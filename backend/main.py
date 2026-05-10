@@ -3,19 +3,25 @@ from urllib.parse import unquote
 from uuid import uuid4
 import json
 import logging
+import os
+import shutil
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .llm_chat import chat_with_llm
-from .rag_pipeline import ingest_document
+from .rag_pipeline import EMBEDDING_DIMENSIONS, ingest_document
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DOCUMENTS_DIR = DATA_DIR / "documents"
 ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "csv"}
+DEFAULT_STORAGE_LIMIT_BYTES = 512 * 1024 * 1024
+STORAGE_LIMIT_BYTES = int(os.getenv("STORAGE_LIMIT_BYTES", DEFAULT_STORAGE_LIMIT_BYTES))
+STORAGE_SAFETY_MARGIN_BYTES = int(os.getenv("STORAGE_SAFETY_MARGIN_BYTES", 32 * 1024 * 1024))
+VECTOR_METADATA_BYTES_PER_CHUNK = int(os.getenv("VECTOR_METADATA_BYTES_PER_CHUNK", 2048))
 
 DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -42,6 +48,93 @@ class ChatRequest(BaseModel):
 
 def get_file_extension(filename: str) -> str:
     return Path(filename).suffix.lower().removeprefix(".")
+
+
+def format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / (1024 * 1024 * 1024):.1f} GB"
+
+
+def directory_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+
+    total = 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            total += item.stat().st_size
+    return total
+
+
+def estimate_generated_size(text: str, chunks: list[str]) -> int:
+    text_size = len(text.encode("utf-8"))
+    chunk_text_size = sum(len(chunk.encode("utf-8")) for chunk in chunks)
+    vector_size = len(chunks) * EMBEDDING_DIMENSIONS * 4
+    metadata_size = len(chunks) * VECTOR_METADATA_BYTES_PER_CHUNK
+    return text_size + chunk_text_size + vector_size + metadata_size + STORAGE_SAFETY_MARGIN_BYTES
+
+
+def storage_limit_message(
+    current_size: int,
+    required_size: int,
+    filename: str,
+    character_count: int,
+    chunk_count: int,
+) -> str:
+    available_size = max(STORAGE_LIMIT_BYTES - current_size, 0)
+    return (
+        f"Storage limit reached while processing {filename}. "
+        f"This deployment allows {format_bytes(STORAGE_LIMIT_BYTES)} total storage. "
+        f"Already used: {format_bytes(current_size)}. "
+        f"Available: {format_bytes(available_size)}. "
+        f"The parsed document has {character_count:,} characters and {chunk_count:,} chunks. "
+        f"Estimated space still needed for extracted text, chunk text, embeddings, and index metadata: "
+        f"{format_bytes(required_size)}. The upload was removed. "
+        "Please remove older uploads or use a smaller file."
+    )
+
+
+def ensure_generated_storage_budget(
+    text: str,
+    chunks: list[str],
+    filename: str,
+) -> None:
+    current_size = directory_size(DATA_DIR)
+    required_size = estimate_generated_size(text, chunks)
+
+    if current_size + required_size > STORAGE_LIMIT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=storage_limit_message(
+                current_size=current_size,
+                required_size=required_size,
+                filename=filename,
+                character_count=len(text),
+                chunk_count=len(chunks),
+            ),
+        )
+
+
+def ensure_actual_storage_under_limit(document_dir: Path, filename: str) -> None:
+    current_size = directory_size(DATA_DIR)
+    if current_size <= STORAGE_LIMIT_BYTES:
+        return
+
+    shutil.rmtree(document_dir, ignore_errors=True)
+    raise HTTPException(
+        status_code=507,
+        detail=(
+            f"Storage limit reached while processing {filename}. "
+            f"After extracting text and building the vector index, usage grew to "
+            f"{format_bytes(current_size)} against a {format_bytes(STORAGE_LIMIT_BYTES)} limit. "
+            "The upload was removed. Please try a smaller file or clear older uploads."
+        ),
+    )
 
 
 def document_paths(document_id: str) -> dict[str, Path]:
@@ -103,9 +196,22 @@ async def upload_document(request: Request) -> dict:
         json.dump(metadata, metadata_file, indent=2)
 
     try:
-        metadata["ingestion"] = ingest_document(metadata)
+        metadata["ingestion"] = ingest_document(
+            metadata,
+            storage_guard=lambda text, chunks: ensure_generated_storage_budget(
+                text,
+                chunks,
+                safe_filename,
+            ),
+        )
+    except HTTPException:
+        shutil.rmtree(paths["dir"], ignore_errors=True)
+        raise
     except Exception as exc:
+        shutil.rmtree(paths["dir"], ignore_errors=True)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    ensure_actual_storage_under_limit(paths["dir"], safe_filename)
 
     with paths["metadata"].open("w", encoding="utf-8") as metadata_file:
         json.dump(metadata, metadata_file, indent=2)

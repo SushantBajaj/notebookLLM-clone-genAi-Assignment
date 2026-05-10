@@ -1,4 +1,5 @@
 from pathlib import Path
+from collections.abc import Callable
 import hashlib
 import math
 import re
@@ -45,14 +46,21 @@ def get_embeddings() -> LocalHashEmbeddings:
     return LocalHashEmbeddings()
 
 
-def ingest_document(document: dict) -> dict:
+def ingest_document(
+    document: dict,
+    storage_guard: Callable[[str, list[str]], None] | None = None,
+) -> dict:
     text = parse_document(document["path"], document["extension"])
+    chunks = chunk_text(text)
+
+    if storage_guard:
+        storage_guard(text, chunks)
+
     document_dir = Path(document["path"]).parent
     text_path = document_dir / "extracted_text.txt"
     vector_path = document_dir / "faiss_index"
     text_path.write_text(text, encoding="utf-8")
 
-    chunks = chunk_text(text)
     vector_store = FAISS.from_texts(
         chunks,
         embedding=get_embeddings(),
