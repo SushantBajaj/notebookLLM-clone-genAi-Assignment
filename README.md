@@ -24,6 +24,7 @@ The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The back
 - Each uploaded source has an `Inspect` control for browsing chunk numbers and previewing one chunk at a time.
 - Assistant answers can show their retrieved sources without dumping all source text at once.
 - Source cards inside answers show the document name and chunk number first, with a separate text toggle for the exact retrieved chunk.
+- In the chat composer, `Shift + Up` recalls previously sent prompts and `Shift + Down` moves forward through that history back toward the current draft.
 
 ## Project Structure
 
@@ -87,7 +88,7 @@ Railway needs the app to listen on `$PORT`, so keep that start command.
 The frontend currently calls the deployed Railway backend from `app.js`:
 
 ```js
-const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production.up.railway.app";
+const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-6fb9.up.railway.app";
 ```
 
 If you deploy your own Railway service, replace that URL with your generated backend domain. For local-only development, use:
@@ -117,7 +118,7 @@ The RAG pipeline uses LangChain's `RecursiveCharacterTextSplitter` in [backend/r
 ```python
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 160
-RETRIEVAL_K = 4
+RETRIEVAL_K = 12
 ```
 
 The splitter tries to preserve readable boundaries in this order:

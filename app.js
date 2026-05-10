@@ -1,7 +1,7 @@
 const allowedExtensions = new Set(["pdf", "doc", "docx", "csv"]);
 // Swap this to http://127.0.0.1:8000 when running the backend locally.
-// const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-6fb9.up.railway.app";
-const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-6fb9.up.railway.app";
+// const API_BASE_URL = "http://127.0.0.1:8000";
 
 const documentInput = document.querySelector("#documentInput");
 const uploadZone = document.querySelector("#uploadZone");
@@ -22,6 +22,9 @@ let isThinking = false;
 let isUploading = false;
 let uploadProgressTimer = null;
 let openSourcesMessage = null;
+let sentMessageHistory = [];
+let historyIndex = -1;
+let draftMessage = "";
 
 const uploadSteps = [
   ["Uploading source", "Sending the file to the workspace"],
@@ -81,6 +84,24 @@ function startUploadProgress() {
 
 function getSelectedDocuments() {
   return documents.filter((document) => selectedDocumentIds.has(document.id));
+}
+
+function setChatInputValue(value) {
+  chatInput.value = value;
+  chatInput.focus();
+  chatInput.setSelectionRange(value.length, value.length);
+}
+
+function showHistoryMessage(nextIndex) {
+  historyIndex = nextIndex;
+  if (historyIndex === -1) {
+    setChatInputValue(draftMessage);
+    return;
+  }
+
+  const historyOffset = sentMessageHistory.length - 1 - historyIndex;
+  const historyMessage = sentMessageHistory[historyOffset] || "";
+  setChatInputValue(historyMessage);
 }
 
 function renderDocumentList() {
@@ -531,6 +552,9 @@ chatForm.addEventListener("submit", (event) => {
 
   if (!selectedDocumentIds.size || !question || isThinking) return;
 
+  sentMessageHistory.push(question);
+  historyIndex = -1;
+  draftMessage = "";
   addMessage("user", question);
   chatInput.value = "";
   isThinking = true;
@@ -550,6 +574,31 @@ chatForm.addEventListener("submit", (event) => {
       isThinking = false;
       updateSourceSummary();
     });
+});
+
+chatInput.addEventListener("keydown", (event) => {
+  if (!event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  if (!sentMessageHistory.length) return;
+
+  event.preventDefault();
+
+  if (event.key === "ArrowUp") {
+    if (historyIndex === -1) {
+      draftMessage = chatInput.value;
+      showHistoryMessage(0);
+      return;
+    }
+
+    const nextIndex = Math.min(historyIndex + 1, sentMessageHistory.length - 1);
+    showHistoryMessage(nextIndex);
+    return;
+  }
+
+  if (historyIndex === -1) return;
+
+  const nextIndex = historyIndex - 1;
+  showHistoryMessage(nextIndex);
 });
 
 messages.addEventListener("click", (event) => {
