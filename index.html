@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NoteBook LLM Clone</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="source-panel">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="img">
+              <path d="M7 4.75h7.2L18 8.55v10.7H7z" />
+              <path d="M14 4.75v4h4" />
+              <path d="M9.75 12.25h5.2M9.75 15.25h4" />
+            </svg>
+          </span>
+          <div>
+            <h1>NoteBook LLM Clone</h1>
+            <p>Source-grounded chat, one file at a time.</p>
+          </div>
+        </div>
+
+        <label class="upload-zone" for="documentInput" id="uploadZone">
+          <input
+            id="documentInput"
+            type="file"
+            accept=".pdf,.doc,.docx,.csv,application/pdf,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          />
+          <span class="upload-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="img">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </span>
+          <span class="upload-copy">
+            <span class="upload-title">Upload a source</span>
+            <span class="upload-detail">Drop a PDF, DOC, DOCX, or CSV here</span>
+          </span>
+        </label>
+
+        <section class="source-card is-empty" id="sourceCard" aria-live="polite">
+          <span class="source-label">Current source</span>
+          <strong id="sourceName">No document uploaded</strong>
+          <small id="sourceMeta">Chat unlocks after a file is added.</small>
+          <button class="ghost-button" id="removeFileButton" type="button" hidden>
+            Remove
+          </button>
+        </section>
+      </aside>
+
+      <section class="chat-panel" aria-label="Document chat">
+        <div class="chat-header">
+          <div>
+            <span class="eyebrow">LLM workspace</span>
+            <h2>Chat with your document</h2>
+          </div>
+          <span class="status-pill" id="statusPill">Waiting for source</span>
+        </div>
+
+        <div class="messages" id="messages" aria-live="polite">
+          <article class="message assistant">
+            <p>Upload a source to begin. Once it is attached, the composer will unlock for document-aware questions.</p>
+          </article>
+        </div>
+
+        <form class="composer" id="chatForm">
+          <input
+            id="chatInput"
+            type="text"
+            placeholder="Upload a document to start chatting"
+            autocomplete="off"
+            disabled
+          />
+          <button id="sendButton" type="submit" aria-label="Send message" disabled>
+            <svg viewBox="0 0 24 24" role="img" aria-hidden="true">
+              <path d="M5 12h13M13 6l6 6-6 6" />
+            </svg>
+          </button>
+        </form>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
