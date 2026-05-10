@@ -13,6 +13,7 @@ from .document_parser import parse_document
 
 EMBEDDING_MODEL = "local-hashing-embedding"
 EMBEDDING_DIMENSIONS = 384
+# Moderate character chunks keep prompts compact; overlap preserves context at boundaries.
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 160
 RETRIEVAL_K = 4
@@ -30,6 +31,7 @@ class LocalHashEmbeddings(Embeddings):
         tokens = re.findall(r"[a-zA-Z0-9]+", text.lower())
 
         for token in tokens:
+            # Stable token hashing gives us a dependency-free embedding for this assignment.
             digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
             index = int.from_bytes(digest[:4], "big") % EMBEDDING_DIMENSIONS
             sign = 1.0 if digest[4] % 2 == 0 else -1.0
@@ -53,6 +55,7 @@ def ingest_document(
     text = parse_document(document["path"], document["extension"])
     chunks = chunk_text(text)
 
+    # Let the API reject oversized parsed documents before writing generated index files.
     if storage_guard:
         storage_guard(text, chunks)
 
@@ -89,6 +92,7 @@ def chunk_text(text: str) -> list[str]:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
+        # Prefer paragraph and sentence boundaries before falling back to hard splits.
         separators=["\n\n", "\n", ". ", " ", ""],
     )
     return splitter.split_text(text)

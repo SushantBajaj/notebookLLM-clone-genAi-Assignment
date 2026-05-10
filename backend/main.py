@@ -72,6 +72,7 @@ def directory_size(path: Path) -> int:
 
 
 def estimate_generated_size(text: str, chunks: list[str]) -> int:
+    # Base the guard on parsed output, not upload size; PDFs and DOCX files can be compressed.
     text_size = len(text.encode("utf-8"))
     chunk_text_size = sum(len(chunk.encode("utf-8")) for chunk in chunks)
     vector_size = len(chunks) * EMBEDDING_DIMENSIONS * 4
@@ -121,6 +122,7 @@ def ensure_generated_storage_budget(
 
 
 def ensure_actual_storage_under_limit(document_dir: Path, filename: str) -> None:
+    # Keep this final check because FAISS can write extra index/docstore overhead.
     current_size = directory_size(DATA_DIR)
     if current_size <= STORAGE_LIMIT_BYTES:
         return
