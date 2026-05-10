@@ -8,6 +8,8 @@ The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The back
 
 - Uploads multiple source documents.
 - Lets users choose the current chat scope with checkboxes in the sidebar.
+- Lets users inspect document chunks from the sidebar.
+- Shows the exact retrieved source chunks behind each answer.
 - Supports PDF, DOC, DOCX, and CSV files.
 - Extracts readable text from the uploaded file.
 - Splits the text into overlapping chunks for retrieval.
@@ -15,6 +17,13 @@ The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The back
 - Sends only the most relevant chunks across uploaded documents to Gemini during chat.
 - Renders assistant Markdown in the frontend, including bold text, lists, links, and code blocks.
 - Adds storage checks for Railway-style limited volume storage.
+
+## Frontend Quality-of-Life Features
+
+- The sidebar keeps long filenames, metadata, document actions, and chunk controls contained in compact source cards.
+- Each uploaded source has an `Inspect` control for browsing chunk numbers and previewing one chunk at a time.
+- Assistant answers can show their retrieved sources without dumping all source text at once.
+- Source cards inside answers show the document name and chunk number first, with a separate text toggle for the exact retrieved chunk.
 
 ## Project Structure
 
@@ -119,7 +128,7 @@ The splitter tries to preserve readable boundaries in this order:
 
 That means it first tries to split around paragraphs, then lines, then sentences, then words. The empty string fallback is there so very long unbroken text can still be split instead of producing one oversized chunk.
 
-The chunk size is deliberately moderate. Around 900 characters keeps each retrieved passage small enough for concise prompts while still giving the model enough surrounding context to answer naturally. The 160-character overlap carries a little context from one chunk into the next, which helps when an answer depends on text near a boundary.
+The chunk size is deliberately moderate. Around 900 characters keeps each retrieved chunk small enough for concise prompts while still giving the model enough surrounding context to answer naturally. The 160-character overlap carries a little context from one chunk into the next, which helps when an answer depends on text near a boundary.
 
 At chat time, the backend retrieves matching chunks from each checked source, sorts them by similarity, and sends the top 12 chunks overall to Gemini. This keeps prompts smaller and keeps answers grounded in the selected files instead of every full document being sent every time.
 
@@ -152,12 +161,15 @@ du -sh backend/data
 GET  /health
 POST /upload
 DELETE /documents/{document_id}
+GET  /documents/{document_id}/chunks
 POST /chat
 ```
 
 `/upload` expects the file body directly and reads the original filename from the `X-Filename` header.
 
 `/documents/{document_id}` removes the uploaded file, extracted text, metadata, and FAISS index for that document.
+
+`/documents/{document_id}/chunks` returns the chunk numbers and text for a processed document, which powers the sidebar chunk inspector.
 
 `/chat` accepts either a single `document_id` or multiple `document_ids`:
 
@@ -167,6 +179,8 @@ POST /chat
   "message": "What do these documents say about the topic?"
 }
 ```
+
+The chat response includes `answer` and `sources`. Each source contains the document name, chunk number, and exact chunk text used as retrieved context.
 
 ## Limitations
 

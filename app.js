@@ -1,6 +1,7 @@
 const allowedExtensions = new Set(["pdf", "doc", "docx", "csv"]);
 // Swap this to http://127.0.0.1:8000 when running the backend locally.
-const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-6fb9.up.railway.app";
+// const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-6fb9.up.railway.app";
+const API_BASE_URL = "http://127.0.0.1:8000";
 
 const documentInput = document.querySelector("#documentInput");
 const uploadZone = document.querySelector("#uploadZone");
@@ -20,6 +21,7 @@ let selectedDocumentIds = new Set();
 let isThinking = false;
 let isUploading = false;
 let uploadProgressTimer = null;
+let openSourcesMessage = null;
 
 const uploadSteps = [
   ["Uploading source", "Sending the file to the workspace"],
@@ -91,25 +93,63 @@ function renderDocumentList() {
   }
 
   documents.forEach((item) => {
-    const label = document.createElement("label");
+    const documentItem = document.createElement("article");
     const isSelected = selectedDocumentIds.has(item.id);
-    label.className = `document-item${isSelected ? " is-selected" : ""}`;
-    label.dataset.documentId = item.id;
-    label.innerHTML = `
-      <input class="document-check" type="checkbox" value="${escapeHtml(item.id)}" ${isSelected ? "checked" : ""} />
-      <span class="document-icon" aria-hidden="true">${escapeHtml(item.extension)}</span>
-      <span class="document-copy">
-        <strong>${escapeHtml(item.filename)}</strong>
-        <small>${escapeHtml(item.extension)} · ${formatBytes(item.sizeBytes)} · ${item.chunkCount.toLocaleString()} chunks</small>
+    documentItem.className = `document-item${isSelected ? " is-selected" : ""}`;
+    documentItem.dataset.documentId = item.id;
+    documentItem.innerHTML = `
+      <label class="document-main">
+        <input class="document-check" type="checkbox" value="${escapeHtml(item.id)}" ${isSelected ? "checked" : ""} />
+        <span class="document-icon" aria-hidden="true">${escapeHtml(item.extension)}</span>
+        <span class="document-copy">
+          <strong>${escapeHtml(item.filename)}</strong>
+          <small>${escapeHtml(item.extension)} · ${formatBytes(item.sizeBytes)} · ${item.chunkCount.toLocaleString()} chunks</small>
+        </span>
+      </label>
+      <span class="document-actions">
+        <button class="document-chunks-toggle" type="button" data-document-id="${escapeHtml(item.id)}">
+          ${item.chunksVisible ? "Hide" : "Inspect"}
+        </button>
+        <button class="document-remove" type="button" data-document-id="${escapeHtml(item.id)}">
+          Remove
+        </button>
       </span>
-      <button class="document-remove" type="button" data-document-id="${escapeHtml(item.id)}" aria-label="Remove ${escapeHtml(item.filename)}">
-        <svg viewBox="0 0 24 24" role="img" aria-hidden="true">
-          <path d="M6 7h12M9 7V5h6v2M10 11v6M14 11v6M8 7l1 12h6l1-12" />
-        </svg>
-      </button>
+      ${renderChunkBrowser(item)}
     `;
-    documentList.append(label);
+    documentList.append(documentItem);
   });
+}
+
+function renderChunkBrowser(item) {
+  if (!item.chunksVisible) return "";
+
+  if (item.chunksLoading) {
+    return '<div class="chunk-browser"><p>Loading chunks...</p></div>';
+  }
+
+  if (item.chunksError) {
+    return `<div class="chunk-browser"><p>${escapeHtml(item.chunksError)}</p></div>`;
+  }
+
+  const chunks = item.chunks || [];
+  const selectedChunk = chunks.find((chunk) => chunk.chunk_index === item.selectedChunkIndex);
+  return `
+    <div class="chunk-browser">
+      <div class="chunk-browser-header">
+        <span>${chunks.length.toLocaleString()} chunks</span>
+      </div>
+      <div class="chunk-number-list">
+        ${chunks.map((chunk) => `
+          <button class="chunk-number${chunk.chunk_index === item.selectedChunkIndex ? " is-active" : ""}" type="button" data-document-id="${escapeHtml(item.id)}" data-chunk-index="${chunk.chunk_index}">
+            ${chunk.chunk_index + 1}
+          </button>
+        `).join("")}
+      </div>
+      <div class="chunk-preview">
+        ${selectedChunk ? `<strong>Chunk ${selectedChunk.chunk_index + 1}</strong><p>${escapeHtml(selectedChunk.text)}</p>` : "<p>Select a chunk to preview its text.</p>"}
+      </div>
+    </div>
+  `;
 }
 
 function updateSourceSummary() {
@@ -236,10 +276,32 @@ function renderMarkdown(content) {
   return blocks.join("");
 }
 
-function addMessage(role, content) {
+function renderSources(sources) {
+  return `
+    <div class="message-sources" hidden>
+      ${sources.map((source) => `
+        <section class="source-snippet">
+          <div class="source-snippet-header">
+            <strong>${escapeHtml(source.filename)} · Chunk ${source.chunk_index + 1}</strong>
+            <button class="source-text-toggle" type="button">Show text</button>
+          </div>
+          <p hidden>${escapeHtml(source.text)}</p>
+        </section>
+      `).join("")}
+    </div>
+  `;
+}
+
+function addMessage(role, content, sources = []) {
   const message = document.createElement("article");
   message.className = `message ${role}`;
   message.innerHTML = role === "assistant" ? renderMarkdown(content) : `<p>${escapeHtml(content)}</p>`;
+  if (role === "assistant" && sources.length) {
+    message.innerHTML += `
+      <button class="sources-toggle" type="button">Show sources</button>
+      ${renderSources(sources)}
+    `;
+  }
   messages.append(message);
   messages.scrollTop = messages.scrollHeight;
   return message;
@@ -312,6 +374,17 @@ async function deleteDocument(documentId) {
   return response.json();
 }
 
+async function fetchDocumentChunks(documentId) {
+  const response = await fetch(`${API_BASE_URL}/documents/${encodeURIComponent(documentId)}/chunks`);
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || "Could not load chunks.");
+  }
+
+  return response.json();
+}
+
 function validateFile(file) {
   if (!file) return false;
 
@@ -338,6 +411,11 @@ async function uploadSingleFile(file, totalFiles, fileIndex) {
       sizeBytes: result.size_bytes,
       characterCount: result.character_count,
       chunkCount: result.chunk_count,
+      chunks: null,
+      chunksError: "",
+      chunksLoading: false,
+      chunksVisible: false,
+      selectedChunkIndex: null,
     };
     documents = [uploadedDocument, ...documents];
     selectedDocumentIds.add(uploadedDocument.id);
@@ -390,9 +468,46 @@ documentList.addEventListener("change", (event) => {
 
 documentList.addEventListener("click", async (event) => {
   const removeButton = event.target.closest(".document-remove");
-  if (!removeButton) return;
+  const chunksButton = event.target.closest(".document-chunks-toggle");
+  const chunkNumberButton = event.target.closest(".chunk-number");
+  if (!removeButton && !chunksButton && !chunkNumberButton) return;
 
   event.preventDefault();
+
+  if (chunksButton) {
+    const documentId = chunksButton.dataset.documentId;
+    const documentItem = documents.find((document) => document.id === documentId);
+    if (!documentItem) return;
+
+    documentItem.chunksVisible = !documentItem.chunksVisible;
+    if (documentItem.chunksVisible && !documentItem.chunks && !documentItem.chunksLoading) {
+      documentItem.chunksLoading = true;
+      documentItem.chunksError = "";
+      renderDocumentList();
+      try {
+        const result = await fetchDocumentChunks(documentId);
+        documentItem.chunks = result.chunks;
+        documentItem.selectedChunkIndex = result.chunks[0]?.chunk_index ?? null;
+      } catch (error) {
+        documentItem.chunksError = error.message;
+      } finally {
+        documentItem.chunksLoading = false;
+      }
+    }
+    renderDocumentList();
+    return;
+  }
+
+  if (chunkNumberButton) {
+    const documentId = chunkNumberButton.dataset.documentId;
+    const documentItem = documents.find((document) => document.id === documentId);
+    if (!documentItem) return;
+
+    documentItem.selectedChunkIndex = Number(chunkNumberButton.dataset.chunkIndex);
+    renderDocumentList();
+    return;
+  }
+
   const documentId = removeButton.dataset.documentId;
   const documentToRemove = documents.find((document) => document.id === documentId);
   if (!documentToRemove) return;
@@ -425,7 +540,7 @@ chatForm.addEventListener("submit", (event) => {
   askDocument(question)
     .then((result) => {
       typingMessage.remove();
-      addMessage("assistant", result.answer);
+      addMessage("assistant", result.answer, result.sources || []);
     })
     .catch((error) => {
       typingMessage.remove();
@@ -435,6 +550,32 @@ chatForm.addEventListener("submit", (event) => {
       isThinking = false;
       updateSourceSummary();
     });
+});
+
+messages.addEventListener("click", (event) => {
+  const sourceTextToggle = event.target.closest(".source-text-toggle");
+  if (sourceTextToggle) {
+    const sourceText = sourceTextToggle.closest(".source-snippet")?.querySelector("p");
+    if (!sourceText) return;
+
+    const isOpening = sourceText.hidden;
+    sourceText.hidden = !isOpening;
+    sourceTextToggle.textContent = isOpening ? "Hide text" : "Show text";
+    return;
+  }
+
+  const toggle = event.target.closest(".sources-toggle");
+  if (!toggle) return;
+
+  const sourcePanel = toggle.nextElementSibling;
+  const isOpening = sourcePanel.hidden;
+  if (openSourcesMessage && openSourcesMessage !== sourcePanel) {
+    openSourcesMessage.hidden = true;
+    openSourcesMessage.previousElementSibling.textContent = "Show sources";
+  }
+  sourcePanel.hidden = !isOpening;
+  toggle.textContent = isOpening ? "Hide sources" : "Show sources";
+  openSourcesMessage = isOpening ? sourcePanel : null;
 });
 
 ["dragenter", "dragover"].forEach((eventName) => {

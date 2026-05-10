@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .llm_chat import chat_with_llm
-from .rag_pipeline import EMBEDDING_DIMENSIONS, ingest_document
+from .rag_pipeline import EMBEDDING_DIMENSIONS, chunk_text, ingest_document
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -252,12 +252,37 @@ async def delete_document(document_id: str) -> dict[str, str]:
     return {"document_id": document_id, "message": "Document removed."}
 
 
+@app.get("/documents/{document_id}/chunks")
+async def get_document_chunks(document_id: str) -> dict:
+    metadata = load_metadata(document_id)
+    text_path_value = metadata.get("ingestion", {}).get("text_path")
+    if not text_path_value:
+        raise HTTPException(status_code=404, detail="Document chunks not found")
+
+    text_path = Path(text_path_value)
+    if not text_path.exists():
+        raise HTTPException(status_code=404, detail="Document chunks not found")
+
+    chunks = chunk_text(text_path.read_text(encoding="utf-8"))
+    return {
+        "document_id": document_id,
+        "filename": metadata["filename"],
+        "chunks": [
+            {
+                "chunk_index": index,
+                "text": chunk,
+            }
+            for index, chunk in enumerate(chunks)
+        ],
+    }
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest) -> dict:
     document_ids = get_chat_document_ids(request)
     documents = [load_metadata(document_id) for document_id in document_ids]
     try:
-        answer = await chat_with_llm(
+        result = await chat_with_llm(
             message=request.message,
             documents=documents,
         )
@@ -266,5 +291,6 @@ async def chat(request: ChatRequest) -> dict:
 
     return {
         "document_ids": document_ids,
-        "answer": answer,
+        "answer": result["answer"],
+        "sources": result["sources"],
     }

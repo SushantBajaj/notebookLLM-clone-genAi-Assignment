@@ -29,7 +29,7 @@ GEMINI_MODELS = [
 ]
 
 
-async def chat_with_llm(message: str, documents: list[dict]) -> str:
+async def chat_with_llm(message: str, documents: list[dict]) -> dict:
     matches = retrieve_document_contexts(documents, message)
     context = format_context(matches)
     source_names = ", ".join(document.get("filename", "uploaded document") for document in documents)
@@ -72,7 +72,10 @@ async def chat_with_llm(message: str, documents: list[dict]) -> str:
                 getattr(usage, "candidates_token_count", None),
                 getattr(usage, "total_token_count", None),
             )
-            return response.text or "The model returned an empty response."
+            return {
+                "answer": response.text or "The model returned an empty response.",
+                "sources": format_sources(matches),
+            }
         except Exception as exc:
             last_error = exc
             logger.exception("gemini_model_failed model=%s error=%s", model, exc)
@@ -122,6 +125,23 @@ def format_context(matches: list[dict]) -> str:
         )
 
     return "\n\n".join(blocks)
+
+
+def format_sources(matches: list[dict]) -> list[dict]:
+    sources = []
+    for match in matches:
+        metadata = match.get("metadata", {})
+        sources.append(
+            {
+                "document_id": metadata.get("document_id"),
+                "filename": match.get("filename") or metadata.get("filename", "uploaded document"),
+                "chunk_index": metadata.get("chunk_index", 0),
+                "text": match["text"],
+                "score": match["score"],
+            }
+        )
+
+    return sources
 
 
 async def count_prompt_tokens(
