@@ -121,7 +121,7 @@ That means it first tries to split around paragraphs, then lines, then sentences
 
 The chunk size is deliberately moderate. Around 900 characters keeps each retrieved passage small enough for concise prompts while still giving the model enough surrounding context to answer naturally. The 160-character overlap carries a little context from one chunk into the next, which helps when an answer depends on text near a boundary.
 
-At chat time, the backend retrieves matching chunks from each checked source, sorts them by similarity, and sends the top 4 chunks overall to Gemini. This keeps prompts smaller and keeps answers grounded in the selected files instead of every full document being sent every time.
+At chat time, the backend retrieves matching chunks from each checked source, sorts them by similarity, and sends the top 12 chunks overall to Gemini. This keeps prompts smaller and keeps answers grounded in the selected files instead of every full document being sent every time.
 
 ## Storage Behavior
 
