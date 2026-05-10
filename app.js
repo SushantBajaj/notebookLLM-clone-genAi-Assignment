@@ -1,7 +1,6 @@
 const allowedExtensions = new Set(["pdf", "doc", "docx", "csv"]);
 // Swap this to http://127.0.0.1:8000 when running the backend locally.
-const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-6fb9.up.railway.app";
-// const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-aaf3.up.railway.app";
 
 const documentInput = document.querySelector("#documentInput");
 const uploadZone = document.querySelector("#uploadZone");

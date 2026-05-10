@@ -88,7 +88,7 @@ Railway needs the app to listen on `$PORT`, so keep that start command.
 The frontend currently calls the deployed Railway backend from `app.js`:
 
 ```js
-const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-6fb9.up.railway.app";
+const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-aaf3.up.railway.app";
 ```
 
 If you deploy your own Railway service, replace that URL with your generated backend domain. For local-only development, use:
