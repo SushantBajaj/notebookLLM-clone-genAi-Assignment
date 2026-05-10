@@ -16,7 +16,7 @@ EMBEDDING_DIMENSIONS = 384
 # Moderate character chunks keep prompts compact; overlap preserves context at boundaries.
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 160
-RETRIEVAL_K = 4
+RETRIEVAL_K = 12
 
 
 class LocalHashEmbeddings(Embeddings):

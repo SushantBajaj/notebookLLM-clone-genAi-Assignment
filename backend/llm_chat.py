@@ -5,19 +5,19 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from .rag_pipeline import retrieve_context
+from .rag_pipeline import RETRIEVAL_K, retrieve_context
 
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an AI Assistant who helps resolving the user query based on the available context provided to you from PDF file with the content and page number.
+SYSTEM_PROMPT = """You are an AI Assistant who helps resolve the user query using only the retrieved context from the uploaded document sources.
 
 Rule:
-- Only answer based on the available context from the file only.
+- Only answer based on the available document context.
 - If the answer is not present in the context, say that the document context does not contain enough information.
-- Be concise and cite the chunk numbers you used when helpful.
+- Be concise and cite source filenames and chunk numbers when helpful.
 """
 
 GEMINI_MODELS = [
@@ -29,17 +29,17 @@ GEMINI_MODELS = [
 ]
 
 
-async def chat_with_llm(message: str, document: dict) -> str:
-    filename = document.get("filename", "the uploaded document")
-    matches = retrieve_context(document, message)
-    context = format_context(matches, filename)
-    prompt = build_user_prompt(message, context, filename)
+async def chat_with_llm(message: str, documents: list[dict]) -> str:
+    matches = retrieve_document_contexts(documents, message)
+    context = format_context(matches)
+    source_names = ", ".join(document.get("filename", "uploaded document") for document in documents)
+    prompt = build_user_prompt(message, context, source_names)
     client = create_client()
 
     logger.info(
-        "rag_context document_id=%s filename=%s retrieved_chunks=%s context_chars=%s",
-        document.get("document_id"),
-        filename,
+        "rag_context document_ids=%s filenames=%s retrieved_chunks=%s context_chars=%s",
+        [document.get("document_id") for document in documents],
+        source_names,
         len(matches),
         len(context),
     )
@@ -88,8 +88,20 @@ def create_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def build_user_prompt(message: str, context: str, filename: str) -> str:
-    return f"""File: {filename}
+def retrieve_document_contexts(documents: list[dict], message: str) -> list[dict]:
+    matches = []
+
+    for document in documents:
+        filename = document.get("filename", "uploaded document")
+        for match in retrieve_context(document, message):
+            match["filename"] = filename
+            matches.append(match)
+
+    return sorted(matches, key=lambda match: match["score"])[:RETRIEVAL_K]
+
+
+def build_user_prompt(message: str, context: str, source_names: str) -> str:
+    return f"""Sources: {source_names}
 
 Available context:
 {context}
@@ -99,11 +111,12 @@ User query:
 """
 
 
-def format_context(matches: list[dict], filename: str) -> str:
+def format_context(matches: list[dict]) -> str:
     blocks = []
     for index, match in enumerate(matches, start=1):
         metadata = match.get("metadata", {})
         chunk_index = metadata.get("chunk_index", index - 1)
+        filename = match.get("filename") or metadata.get("filename", "uploaded document")
         blocks.append(
             f"[Chunk {chunk_index} | Source: {filename}]\n{match['text']}"
         )

@@ -19,49 +19,68 @@
           </span>
           <div>
             <h1>NoteBook LLM Clone</h1>
-            <p>Source-grounded chat, one file at a time.</p>
+            <p>Source-grounded chat across your documents.</p>
           </div>
         </div>
 
-        <label class="upload-zone" for="documentInput" id="uploadZone">
-          <input
-            id="documentInput"
-            type="file"
-            accept=".pdf,.doc,.docx,.csv,application/pdf,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-          />
-          <span class="upload-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" role="img">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </span>
-          <span class="upload-copy">
-            <span class="upload-title">Upload a source</span>
-            <span class="upload-detail">Drop a PDF, DOC, DOCX, or CSV here</span>
-          </span>
-        </label>
-
-        <section class="source-card is-empty" id="sourceCard" aria-live="polite">
-          <span class="source-label">Current source</span>
-          <strong id="sourceName">No document uploaded</strong>
-          <small id="sourceMeta">Chat unlocks after a file is added.</small>
-          <button class="ghost-button" id="removeFileButton" type="button" hidden>
-            Remove
-          </button>
+        <section class="document-library" aria-label="Uploaded documents">
+          <div class="library-header">
+            <span class="source-label">Chat sources</span>
+            <span id="documentCount">0</span>
+          </div>
+          <div class="document-list" id="documentList" role="list"></div>
         </section>
+
+        <div class="source-actions">
+          <section class="upload-progress" id="uploadProgress" aria-live="polite" hidden>
+            <div class="progress-orbit" aria-hidden="true">
+              <svg viewBox="0 0 44 44" role="img">
+                <circle class="progress-track" cx="22" cy="22" r="17" />
+                <circle class="progress-ring" cx="22" cy="22" r="17" />
+                <path d="M18 22.5l2.7 2.7L27 18.8" />
+              </svg>
+            </div>
+            <div class="progress-copy">
+              <strong id="uploadProgressTitle">Preparing upload</strong>
+              <span id="uploadProgressDetail">Checking the source file</span>
+              <div class="progress-bar" aria-hidden="true">
+                <span></span>
+              </div>
+            </div>
+          </section>
+
+          <label class="upload-zone" for="documentInput" id="uploadZone">
+            <input
+              id="documentInput"
+              type="file"
+              multiple
+              accept=".pdf,.doc,.docx,.csv,application/pdf,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            />
+            <span class="upload-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" role="img">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </span>
+            <span class="upload-copy">
+              <span class="upload-title">Upload sources</span>
+              <span class="upload-detail">Drop PDFs, DOC, DOCX, or CSV files here</span>
+            </span>
+          </label>
+        </div>
       </aside>
 
       <section class="chat-panel" aria-label="Document chat">
         <div class="chat-header">
           <div>
             <span class="eyebrow">LLM workspace</span>
-            <h2>Chat with your document</h2>
+            <h2>Chat with your documents</h2>
           </div>
           <span class="status-pill" id="statusPill">Waiting for source</span>
         </div>
 
         <div class="messages" id="messages" aria-live="polite">
           <article class="message assistant">
-            <p>Upload a source to begin. Once it is attached, the composer will unlock for document-aware questions.</p>
+            <p>Upload sources to begin. Check the documents you want included, then ask document-aware questions.</p>
           </article>
         </div>
 
@@ -69,7 +88,7 @@
           <input
             id="chatInput"
             type="text"
-            placeholder="Upload a document to start chatting"
+            placeholder="Upload documents to start chatting"
             autocomplete="off"
             disabled
           />

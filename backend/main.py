@@ -42,7 +42,8 @@ app.add_middleware(
 
 
 class ChatRequest(BaseModel):
-    document_id: str = Field(..., min_length=1)
+    document_id: str | None = Field(default=None, min_length=1)
+    document_ids: list[str] = Field(default_factory=list)
     message: str = Field(..., min_length=1)
 
 
@@ -156,6 +157,18 @@ def load_metadata(document_id: str) -> dict:
         return json.load(metadata_file)
 
 
+def get_chat_document_ids(request: ChatRequest) -> list[str]:
+    document_ids = [document_id for document_id in request.document_ids if document_id]
+    if request.document_id:
+        document_ids.append(request.document_id)
+
+    unique_ids = list(dict.fromkeys(document_ids))
+    if not unique_ids:
+        raise HTTPException(status_code=400, detail="At least one document_id is required.")
+
+    return unique_ids
+
+
 @app.get("/health")
 def health_check() -> dict[str, str]:
     return {"status": "ok"}
@@ -229,18 +242,29 @@ async def upload_document(request: Request) -> dict:
     }
 
 
+@app.delete("/documents/{document_id}")
+async def delete_document(document_id: str) -> dict[str, str]:
+    paths = document_paths(document_id)
+    if not paths["dir"].exists():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    shutil.rmtree(paths["dir"], ignore_errors=True)
+    return {"document_id": document_id, "message": "Document removed."}
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest) -> dict:
-    metadata = load_metadata(request.document_id)
+    document_ids = get_chat_document_ids(request)
+    documents = [load_metadata(document_id) for document_id in document_ids]
     try:
         answer = await chat_with_llm(
             message=request.message,
-            document=metadata,
+            documents=documents,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {
-        "document_id": request.document_id,
+        "document_ids": document_ids,
         "answer": answer,
     }

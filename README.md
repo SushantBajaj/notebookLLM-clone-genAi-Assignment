@@ -1,17 +1,18 @@
 # NoteBook LLM Clone
 
-A small NotebookLM-style assignment project: upload one document, let the backend parse and index it, then ask questions grounded in that document.
+A small NotebookLM-style assignment project: upload documents, let the backend parse and index them, then ask questions grounded in those sources.
 
 The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The backend extracts text from PDF, DOC, DOCX, or CSV files, chunks the text, stores a local FAISS index, retrieves relevant chunks, and asks Gemini to answer using that context.
 
 ## What It Does
 
-- Uploads one source document at a time.
+- Uploads multiple source documents.
+- Lets users choose the current chat scope with checkboxes in the sidebar.
 - Supports PDF, DOC, DOCX, and CSV files.
 - Extracts readable text from the uploaded file.
 - Splits the text into overlapping chunks for retrieval.
 - Builds a local FAISS vector index using deterministic local hash embeddings.
-- Sends only the most relevant document chunks to Gemini during chat.
+- Sends only the most relevant chunks across uploaded documents to Gemini during chat.
 - Renders assistant Markdown in the frontend, including bold text, lists, links, and code blocks.
 - Adds storage checks for Railway-style limited volume storage.
 
@@ -120,7 +121,7 @@ That means it first tries to split around paragraphs, then lines, then sentences
 
 The chunk size is deliberately moderate. Around 900 characters keeps each retrieved passage small enough for concise prompts while still giving the model enough surrounding context to answer naturally. The 160-character overlap carries a little context from one chunk into the next, which helps when an answer depends on text near a boundary.
 
-At chat time, the backend retrieves the top 4 matching chunks from FAISS and sends only those chunks to Gemini. This keeps prompts smaller and keeps answers grounded in the uploaded file instead of the whole document being sent every time.
+At chat time, the backend retrieves matching chunks from each checked source, sorts them by similarity, and sends the top 4 chunks overall to Gemini. This keeps prompts smaller and keeps answers grounded in the selected files instead of every full document being sent every time.
 
 ## Storage Behavior
 
@@ -150,24 +151,27 @@ du -sh backend/data
 ```text
 GET  /health
 POST /upload
+DELETE /documents/{document_id}
 POST /chat
 ```
 
 `/upload` expects the file body directly and reads the original filename from the `X-Filename` header.
 
-`/chat` expects:
+`/documents/{document_id}` removes the uploaded file, extracted text, metadata, and FAISS index for that document.
+
+`/chat` accepts either a single `document_id` or multiple `document_ids`:
 
 ```json
 {
-  "document_id": "uploaded_document_id",
-  "message": "What is this document about?"
+  "document_ids": ["first_uploaded_document_id", "second_uploaded_document_id"],
+  "message": "What do these documents say about the topic?"
 }
 ```
 
 ## Limitations
 
 - This is assignment-grade storage, not production document management.
-- Local Railway volume storage can fill up, so old uploads may need to be deleted manually.
+- Railway volume storage can still fill up if many large files are uploaded, but removing a source from the UI also deletes its backend files.
 - Legacy `.doc` parsing is best-effort because old Word files are messy without heavier conversion tooling.
 - The local hash embedding is deterministic and free, but not as semantically strong as a real embedding model.
 
