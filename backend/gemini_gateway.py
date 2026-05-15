@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = {429, 503}
 DEFAULT_GEMINI_TIMEOUT_SECONDS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "90"))
+PLACEHOLDER_API_KEYS = {
+    "your_gemini_api_key_here",
+    "your_first_key_here",
+    "your_second_key_here",
+}
 
 
 @dataclass(frozen=True)
@@ -158,13 +163,18 @@ def get_gemini_gateway() -> GeminiGateway:
 
 def load_api_keys() -> list[str]:
     raw_keys = os.getenv("GEMINI_API_KEYS", "")
-    keys = [key.strip() for key in raw_keys.split(",") if key.strip()]
+    keys = [key.strip() for key in raw_keys.split(",") if is_real_api_key(key)]
 
     single_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if single_key and single_key != "your_gemini_api_key_here":
+    if is_real_api_key(single_key):
         keys.insert(0, single_key)
 
     return unique_values(keys)
+
+
+def is_real_api_key(value: str) -> bool:
+    key = value.strip()
+    return bool(key and key not in PLACEHOLDER_API_KEYS)
 
 
 def unique_values(values: list[str]) -> list[str]:

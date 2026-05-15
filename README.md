@@ -104,14 +104,17 @@ const API_BASE_URL = "http://127.0.0.1:8000";
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
-# Optional comma-separated pool. If set, the backend rotates to the next key on 429/503.
-GEMINI_API_KEYS=your_first_key_here,your_second_key_here
+# Optional comma-separated pool. Leave blank unless you have extra keys.
+# Example: GEMINI_API_KEYS=AIza...first,AIza...second
+GEMINI_API_KEYS=
 GEMINI_MODEL=gemini-flash-latest
 CRAG_MODEL=gemini-2.5-flash-lite
 CRAG_TIMEOUT_SECONDS=20
 GEMINI_TIMEOUT_SECONDS=90
 QUERY_VARIANT_COUNT=3
 QUERY_VARIANT_RETRIEVAL_K=5
+FINAL_CONTEXT_K=10
+RERANK_CANDIDATE_K=24
 
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 EMBEDDING_DIMENSIONS=384
@@ -128,9 +131,9 @@ VECTOR_METADATA_BYTES_PER_CHUNK=2048
 
 The storage settings are intentionally visible because generated files can be much larger than the uploaded file. A compressed PDF may upload as a small file but expand into much more extracted text and index data.
 
-`GEMINI_API_KEYS` is optional. When multiple keys are configured, the backend keeps using the current key until Gemini returns a retryable `429` or `503`, then switches to the next key in a circular pool. Logs include the current step, model, and key index, but never print the key itself.
+`GEMINI_API_KEYS` is optional. Put extra keys in one comma-separated line, without spaces required, such as `GEMINI_API_KEYS=AIza...first,AIza...second`. The backend combines `GEMINI_API_KEY` with any keys from `GEMINI_API_KEYS`, ignores placeholder values, removes duplicates, and keeps using the current key until Gemini returns a retryable `429` or `503`. It then switches to the next key in a circular pool. Logs include the current step, model, and key index, but never print the key itself.
 
-`GEMINI_MODEL` controls the final answer model and keeps `gemini-flash-latest` as the preferred default. `CRAG_MODEL` is separate and is used only for query rewriting, retrieval grading, HyDE passage generation, and query variant generation. `CRAG_TIMEOUT_SECONDS` prevents CRAG helper calls from hanging the chat; if grading times out or fails, the backend falls back to a weak grade when chunks exist so the corrective branch still runs. `GEMINI_TIMEOUT_SECONDS` is the default timeout for other Gemini generation calls. `QUERY_VARIANT_COUNT` and `QUERY_VARIANT_RETRIEVAL_K` control how many focused variants are generated and how many chunks each variant retrieves.
+`GEMINI_MODEL` controls the final answer model and keeps `gemini-flash-latest` as the preferred default. `CRAG_MODEL` is separate and is used only for query rewriting, retrieval grading, HyDE passage generation, query variant generation, reranking, and answerability checks. `CRAG_TIMEOUT_SECONDS` prevents CRAG helper calls from hanging the chat; if grading times out or fails, the backend falls back to a weak grade when chunks exist so the corrective branch still runs. `GEMINI_TIMEOUT_SECONDS` is the default timeout for other Gemini generation calls. `QUERY_VARIANT_COUNT` and `QUERY_VARIANT_RETRIEVAL_K` control how many focused variants are generated and how many chunks each variant retrieves. `RERANK_CANDIDATE_K` controls how many deduplicated candidates are sent to the reranker, and `FINAL_CONTEXT_K` controls how many final chunks reach the answer model.
 
 ## RAG Strategy
 
@@ -157,9 +160,12 @@ At chat time, the backend runs a CRAG loop before final answer generation:
    - retrieve with the rewritten query
    - generate a HyDE passage and retrieve with it
    - generate focused query variants and retrieve with each variant
-5. Merge the corrective context pool, deduplicate by document id and chunk index, then send only the final top 12 chunks to Gemini.
+5. Merge the corrective context pool and deduplicate by document id and chunk index.
+6. Rerank candidate chunks against the original query.
+7. Run an answerability check on the final selected chunks.
+8. Send only the filtered final chunks to Gemini.
 
-This is a single corrective pass, not an unbounded retry loop. If the first retrieval grade is `good`, the initial rewritten-query results are used. If the grade is `weak` or `bad`, the backend builds one larger corrective context pool from original-query retrieval, rewritten-query retrieval, HyDE retrieval, and query-variant retrieval. The final answer still receives only the deduplicated top 12 chunks.
+This is a single corrective pass, not an unbounded retry loop. If the first retrieval grade is `good`, the initial rewritten-query results are used. If the grade is `weak` or `bad`, the backend builds one larger corrective context pool from original-query retrieval, rewritten-query retrieval, HyDE retrieval, and query-variant retrieval. The final answer still receives only the reranked and filtered final chunks.
 
 The final answer model still uses `GEMINI_MODEL` and its existing fallback list. `CRAG_MODEL` is only for CRAG helper steps.
 
@@ -174,6 +180,8 @@ The `/chat` response includes CRAG metadata for the frontend `Info` control:
 - `query_variants`
 - `context_pool_count`
 - `corrective_retrieval_counts`
+- `rerank`
+- `answerability`
 - `final_source_count`
 
 Each returned source can also include retrieval pass labels such as `initial_rewritten_query`, `retry_original_query`, `retry_rewritten_query`, `hyde_passage`, or `query_variant_1`.

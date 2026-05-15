@@ -346,6 +346,9 @@ function renderCragDetails(crag) {
   const contextPoolCount = Number.isFinite(crag.context_pool_count) ? crag.context_pool_count : 0;
   const variants = Array.isArray(crag.query_variants) ? crag.query_variants : [];
   const hydePassage = crag.hyde_passage || "";
+  const rerank = crag.rerank || {};
+  const answerability = crag.answerability || {};
+  const answerabilityLabel = formatAnswerability(answerability.answerable);
 
   return `
     <button class="query-crag-toggle" type="button" aria-expanded="false">
@@ -356,9 +359,13 @@ function renderCragDetails(crag) {
         <span><strong>${escapeHtml(grade)}</strong><small>Grade</small></span>
         <span><strong>${sourceCount}</strong><small>Sources</small></span>
         <span><strong>${crag.corrective_retry ? contextPoolCount : sourceCount}</strong><small>Pool</small></span>
+        <span><strong>${rerank.used ? "Yes" : "No"}</strong><small>Rerank</small></span>
+        <span><strong>${escapeHtml(answerabilityLabel)}</strong><small>Answerable</small></span>
       </div>
       <p class="query-crag-note">${escapeHtml(retryText)}${crag.corrective_retry ? ` · HyDE ${crag.hyde_used ? "used" : "not used"} · ${variants.length} variant${variants.length === 1 ? "" : "s"}` : ""}</p>
       ${crag.retrieval_rationale ? `<p class="query-crag-rationale">${escapeHtml(crag.retrieval_rationale)}</p>` : ""}
+      ${answerability.reason ? `<p class="query-crag-rationale">${escapeHtml(answerability.reason)}</p>` : ""}
+      ${renderMissingInfo(answerability.missing)}
       <details class="query-artifact">
         <summary>Show rewritten query</summary>
         <p>${escapeHtml(crag.rewritten_query)}</p>
@@ -366,6 +373,23 @@ function renderCragDetails(crag) {
       ${renderHydePassage(hydePassage)}
       ${renderQueryVariants(variants)}
     </div>
+  `;
+}
+
+function formatAnswerability(value) {
+  if (value === true) return "Likely";
+  if (value === false) return "Unclear";
+  return "Unknown";
+}
+
+function renderMissingInfo(missing = []) {
+  if (!Array.isArray(missing) || !missing.length) return "";
+
+  return `
+    <details class="query-artifact">
+      <summary>Show missing info</summary>
+      ${missing.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+    </details>
   `;
 }
 

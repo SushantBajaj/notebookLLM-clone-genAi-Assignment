@@ -40,6 +40,9 @@ CRAG_WEAK_GRADES = {"weak", "bad"}
 CRAG_TIMEOUT_SECONDS = int(os.getenv("CRAG_TIMEOUT_SECONDS", "20"))
 QUERY_VARIANT_COUNT = int(os.getenv("QUERY_VARIANT_COUNT", "3"))
 QUERY_VARIANT_RETRIEVAL_K = int(os.getenv("QUERY_VARIANT_RETRIEVAL_K", "5"))
+FINAL_CONTEXT_K = int(os.getenv("FINAL_CONTEXT_K", "10"))
+RERANK_CANDIDATE_K = int(os.getenv("RERANK_CANDIDATE_K", "24"))
+CHUNK_PREVIEW_CHARS = 700
 
 
 async def chat_with_llm(message: str, documents: list[dict]) -> dict:
@@ -109,6 +112,17 @@ async def run_basic_crag_loop(message: str, documents: list[dict]) -> dict:
     query_variants = []
     corrective_retrieval_counts = {}
     context_pool_count = 0
+    rerank_metadata = {
+        "used": False,
+        "fallback": False,
+        "candidate_count": 0,
+        "selected_count": 0,
+    }
+    answerability = {
+        "answerable": None,
+        "reason": "Answerability check has not run.",
+        "missing": [],
+    }
     initial_matches = retrieve_document_contexts(
         documents,
         rewritten_query,
@@ -173,10 +187,10 @@ async def run_basic_crag_loop(message: str, documents: list[dict]) -> dict:
         }
         candidate_matches = dedupe_matches(
             context_pool,
-            limit=RETRIEVAL_K,
+            limit=RERANK_CANDIDATE_K,
         )
         logger.info(
-            "crag_corrective_retry grade=%s original_chunks=%s rewritten_chunks=%s hyde_chunks=%s variant_chunks=%s variants=%s context_pool=%s deduped_final_chunks=%s",
+            "crag_corrective_retry grade=%s original_chunks=%s rewritten_chunks=%s hyde_chunks=%s variant_chunks=%s variants=%s context_pool=%s deduped_candidates=%s",
             grade_value,
             len(original_matches),
             len(rewritten_retry_matches),
@@ -187,12 +201,28 @@ async def run_basic_crag_loop(message: str, documents: list[dict]) -> dict:
             len(candidate_matches),
         )
     else:
-        candidate_matches = dedupe_matches(candidate_matches, limit=RETRIEVAL_K)
+        candidate_matches = dedupe_matches(candidate_matches, limit=RERANK_CANDIDATE_K)
         logger.info(
-            "crag_context_accepted grade=%s final_chunks=%s",
+            "crag_context_accepted grade=%s candidates=%s",
             grade_value,
             len(candidate_matches),
         )
+
+    final_matches, rerank_metadata = await rerank_context(
+        original_query=message,
+        rewritten_query=rewritten_query,
+        matches=candidate_matches,
+        limit=FINAL_CONTEXT_K,
+    )
+    answerability = await check_answerability(message, rewritten_query, final_matches)
+    logger.info(
+        "crag_final_filter candidates=%s selected=%s rerank_used=%s rerank_fallback=%s answerable=%s",
+        len(candidate_matches),
+        len(final_matches),
+        rerank_metadata["used"],
+        rerank_metadata["fallback"],
+        answerability["answerable"],
+    )
 
     return {
         "rewritten_query": rewritten_query,
@@ -202,7 +232,9 @@ async def run_basic_crag_loop(message: str, documents: list[dict]) -> dict:
         "query_variants": query_variants,
         "corrective_retrieval_counts": corrective_retrieval_counts,
         "context_pool_count": context_pool_count,
-        "matches": candidate_matches,
+        "rerank": rerank_metadata,
+        "answerability": answerability,
+        "matches": final_matches,
     }
 
 
@@ -423,6 +455,181 @@ Rationale: {grade["rationale"]}
     return cleaned_variants
 
 
+async def rerank_context(
+    original_query: str,
+    rewritten_query: str,
+    matches: list[dict],
+    limit: int,
+) -> tuple[list[dict], dict]:
+    metadata = {
+        "used": False,
+        "fallback": False,
+        "candidate_count": len(matches),
+        "selected_count": min(len(matches), limit),
+    }
+    if not matches:
+        return [], metadata
+
+    prompt = f"""Rerank retrieved chunks for answering the user's query.
+
+Return compact JSON only:
+{{"ranked_chunks":[{{"index":0,"relevance":0.95,"reason":"short reason"}}]}}
+
+Rules:
+- Rank by usefulness for answering the original query, not by writing quality.
+- Include at most {limit} chunks.
+- Use only indexes from the candidate list.
+- Prefer chunks with direct evidence over broad background.
+
+Original query:
+{original_query}
+
+Rewritten query:
+{rewritten_query}
+
+Candidate chunks:
+{format_rerank_candidates(matches[:RERANK_CANDIDATE_K])}
+"""
+    config = types.GenerateContentConfig(
+        temperature=0,
+        response_mime_type="application/json",
+    )
+    gateway = get_gemini_gateway()
+
+    try:
+        result = await gateway.generate_content(
+            step="context_rerank",
+            models=preferred_crag_models(),
+            contents=prompt,
+            config=config,
+            timeout_seconds=CRAG_TIMEOUT_SECONDS,
+        )
+        parsed = parse_json_object(result.response.text or "")
+        ranked_chunks = parsed.get("ranked_chunks", [])
+    except Exception as exc:
+        logger.warning("crag_rerank_failed error=%s using_score_order=true", exc)
+        metadata["fallback"] = True
+        return matches[:limit], metadata
+
+    if not isinstance(ranked_chunks, list):
+        metadata["fallback"] = True
+        return matches[:limit], metadata
+
+    selected = []
+    selected_indexes = set()
+    for ranked_chunk in ranked_chunks:
+        if not isinstance(ranked_chunk, dict):
+            continue
+
+        index = ranked_chunk.get("index")
+        if not isinstance(index, int) or index < 0 or index >= len(matches):
+            continue
+        if index in selected_indexes:
+            continue
+
+        match = {
+            **matches[index],
+            "rerank": {
+                "relevance": normalize_relevance(ranked_chunk.get("relevance")),
+                "reason": str(ranked_chunk.get("reason", "")).strip(),
+            },
+        }
+        selected.append(match)
+        selected_indexes.add(index)
+        if len(selected) >= limit:
+            break
+
+    if not selected:
+        metadata["fallback"] = True
+        return matches[:limit], metadata
+
+    metadata["used"] = True
+    metadata["selected_count"] = len(selected)
+    logger.info(
+        "crag_rerank_complete model=%s key_index=%s candidates=%s selected=%s",
+        result.model,
+        result.key_index,
+        len(matches),
+        len(selected),
+    )
+    return selected, metadata
+
+
+async def check_answerability(
+    original_query: str,
+    rewritten_query: str,
+    matches: list[dict],
+) -> dict:
+    fallback = {
+        "answerable": None,
+        "reason": "Answerability check was not available.",
+        "missing": [],
+    }
+    if not matches:
+        return {
+            "answerable": False,
+            "reason": "No final context chunks were selected.",
+            "missing": ["relevant document context"],
+        }
+
+    prompt = f"""Check whether the selected context is enough to answer the user's query.
+
+Return compact JSON only:
+{{"answerable":true,"reason":"short reason","missing":["missing detail"]}}
+
+Use answerable=false if important facts needed by the query are missing.
+
+Original query:
+{original_query}
+
+Rewritten query:
+{rewritten_query}
+
+Selected context:
+{format_context(matches)}
+"""
+    config = types.GenerateContentConfig(
+        temperature=0,
+        response_mime_type="application/json",
+    )
+    gateway = get_gemini_gateway()
+
+    try:
+        result = await gateway.generate_content(
+            step="answerability_check",
+            models=preferred_crag_models(),
+            contents=prompt,
+            config=config,
+            timeout_seconds=CRAG_TIMEOUT_SECONDS,
+        )
+        parsed = parse_json_object(result.response.text or "")
+    except Exception as exc:
+        logger.warning("crag_answerability_failed error=%s", exc)
+        return fallback
+
+    answerable = parsed.get("answerable")
+    if not isinstance(answerable, bool):
+        answerable = None
+
+    missing = parsed.get("missing", [])
+    if not isinstance(missing, list):
+        missing = []
+
+    answerability = {
+        "answerable": answerable,
+        "reason": str(parsed.get("reason", "")).strip() or "No reason returned.",
+        "missing": [str(item).strip() for item in missing if str(item).strip()],
+    }
+    logger.info(
+        "crag_answerability_complete model=%s key_index=%s answerable=%s missing=%s",
+        result.model,
+        result.key_index,
+        answerability["answerable"],
+        len(answerability["missing"]),
+    )
+    return answerability
+
+
 def parse_json_object(value: str) -> dict:
     cleaned = value.strip()
     if cleaned.startswith("```"):
@@ -431,6 +638,30 @@ def parse_json_object(value: str) -> dict:
             cleaned = cleaned[4:].strip()
 
     return json.loads(cleaned)
+
+
+def format_rerank_candidates(matches: list[dict]) -> str:
+    blocks = []
+    for index, match in enumerate(matches):
+        metadata = match.get("metadata", {})
+        filename = match.get("filename") or metadata.get("filename", "uploaded document")
+        chunk_index = metadata.get("chunk_index", 0)
+        text = match["text"].replace("\n", " ").strip()
+        preview = text[:CHUNK_PREVIEW_CHARS]
+        if len(text) > CHUNK_PREVIEW_CHARS:
+            preview += "..."
+        blocks.append(
+            f"[Index {index} | Source: {filename} | Chunk {chunk_index} | Score: {match['score']:.4f}]\n{preview}"
+        )
+
+    return "\n\n".join(blocks)
+
+
+def normalize_relevance(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return max(0.0, min(float(value), 1.0))
+
+    return None
 
 
 def preferred_crag_models() -> list[str]:
@@ -519,6 +750,7 @@ def format_sources(matches: list[dict]) -> list[dict]:
                 "text": match["text"],
                 "score": match["score"],
                 "retrieval_paths": match.get("retrieval_paths") or [match.get("retrieval_path", "semantic")],
+                "rerank": match.get("rerank"),
             }
         )
 
@@ -537,6 +769,8 @@ def format_crag_metadata(crag_result: dict) -> dict:
         "query_variants": crag_result["query_variants"],
         "corrective_retrieval_counts": crag_result["corrective_retrieval_counts"],
         "context_pool_count": crag_result["context_pool_count"],
+        "rerank": crag_result["rerank"],
+        "answerability": crag_result["answerability"],
         "final_source_count": len(crag_result["matches"]),
     }
 
