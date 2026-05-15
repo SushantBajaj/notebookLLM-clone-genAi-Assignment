@@ -328,6 +328,10 @@ function formatRetrievalPath(path) {
     initial_rewritten_query: "Initial rewrite",
     retry_original_query: "Retry original",
     retry_rewritten_query: "Retry rewrite",
+    hyde_passage: "HyDE",
+    query_variant_1: "Variant 1",
+    query_variant_2: "Variant 2",
+    query_variant_3: "Variant 3",
     semantic: "Semantic",
   };
   return labels[path] || path;
@@ -339,20 +343,51 @@ function renderCragDetails(crag) {
   const grade = crag.retrieval_grade || "unknown";
   const retryText = crag.corrective_retry ? "Corrective retry used" : "Initial context used";
   const sourceCount = Number.isFinite(crag.final_source_count) ? crag.final_source_count : 0;
+  const contextPoolCount = Number.isFinite(crag.context_pool_count) ? crag.context_pool_count : 0;
+  const variants = Array.isArray(crag.query_variants) ? crag.query_variants : [];
+  const hydePassage = crag.hyde_passage || "";
 
   return `
     <button class="query-crag-toggle" type="button" aria-expanded="false">
       Info
     </button>
     <div class="query-crag" hidden>
-      <small>Retrieval grade: ${escapeHtml(grade)}</small>
-      <small>${escapeHtml(retryText)} · ${sourceCount} final source${sourceCount === 1 ? "" : "s"}</small>
-      ${crag.retrieval_rationale ? `<small>${escapeHtml(crag.retrieval_rationale)}</small>` : ""}
-      <details class="rewritten-query">
+      <div class="query-crag-grid">
+        <span><strong>${escapeHtml(grade)}</strong><small>Grade</small></span>
+        <span><strong>${sourceCount}</strong><small>Sources</small></span>
+        <span><strong>${crag.corrective_retry ? contextPoolCount : sourceCount}</strong><small>Pool</small></span>
+      </div>
+      <p class="query-crag-note">${escapeHtml(retryText)}${crag.corrective_retry ? ` · HyDE ${crag.hyde_used ? "used" : "not used"} · ${variants.length} variant${variants.length === 1 ? "" : "s"}` : ""}</p>
+      ${crag.retrieval_rationale ? `<p class="query-crag-rationale">${escapeHtml(crag.retrieval_rationale)}</p>` : ""}
+      <details class="query-artifact">
         <summary>Show rewritten query</summary>
         <p>${escapeHtml(crag.rewritten_query)}</p>
       </details>
+      ${renderHydePassage(hydePassage)}
+      ${renderQueryVariants(variants)}
     </div>
+  `;
+}
+
+function renderHydePassage(hydePassage) {
+  if (!hydePassage) return "";
+
+  return `
+    <details class="query-artifact">
+      <summary>Show HyDE passage</summary>
+      <p>${escapeHtml(hydePassage)}</p>
+    </details>
+  `;
+}
+
+function renderQueryVariants(variants) {
+  if (!variants.length) return "";
+
+  return `
+    <details class="query-artifact">
+      <summary>Show query variants</summary>
+      ${variants.map((variant) => `<p>${escapeHtml(variant)}</p>`).join("")}
+    </details>
   `;
 }
 

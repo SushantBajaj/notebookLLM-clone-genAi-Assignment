@@ -780,26 +780,63 @@ h2 {
   display: none;
 }
 
-.query-crag small {
-  display: block;
-  margin-top: 5px;
-  color: rgba(7, 16, 13, 0.66);
-  font-size: 0.74rem;
+.query-crag-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.query-crag-grid span {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  border: 1px solid rgba(7, 16, 13, 0.1);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: rgba(7, 16, 13, 0.035);
+}
+
+.query-crag-grid strong {
+  overflow: hidden;
+  color: rgba(7, 16, 13, 0.86);
+  font-size: 0.82rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.query-crag-grid small,
+.query-crag-note,
+.query-crag-rationale {
+  color: rgba(7, 16, 13, 0.62);
+  font-size: 0.72rem;
   line-height: 1.35;
 }
 
-.rewritten-query {
+.query-crag-note,
+.query-crag-rationale {
   margin-top: 8px;
 }
 
-.rewritten-query summary {
+.query-crag-rationale {
+  color: rgba(7, 16, 13, 0.76);
+}
+
+.query-artifact {
+  margin-top: 8px;
+  border-top: 1px solid rgba(7, 16, 13, 0.09);
+  padding-top: 8px;
+}
+
+.query-artifact summary {
   cursor: pointer;
   color: rgba(7, 16, 13, 0.76);
   font-size: 0.76rem;
   font-weight: 760;
 }
 
-.rewritten-query p {
+.query-artifact p {
   margin-top: 7px;
   color: rgba(7, 16, 13, 0.9);
   font-size: 0.86rem;

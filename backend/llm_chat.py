@@ -38,6 +38,8 @@ CRAG_MODELS = [
 
 CRAG_WEAK_GRADES = {"weak", "bad"}
 CRAG_TIMEOUT_SECONDS = int(os.getenv("CRAG_TIMEOUT_SECONDS", "20"))
+QUERY_VARIANT_COUNT = int(os.getenv("QUERY_VARIANT_COUNT", "3"))
+QUERY_VARIANT_RETRIEVAL_K = int(os.getenv("QUERY_VARIANT_RETRIEVAL_K", "5"))
 
 
 async def chat_with_llm(message: str, documents: list[dict]) -> dict:
@@ -103,6 +105,10 @@ async def chat_with_llm(message: str, documents: list[dict]) -> dict:
 
 async def run_basic_crag_loop(message: str, documents: list[dict]) -> dict:
     rewritten_query = await rewrite_query(message)
+    hyde_passage = ""
+    query_variants = []
+    corrective_retrieval_counts = {}
+    context_pool_count = 0
     initial_matches = retrieve_document_contexts(
         documents,
         rewritten_query,
@@ -131,15 +137,53 @@ async def run_basic_crag_loop(message: str, documents: list[dict]) -> dict:
             rewritten_query,
             retrieval_path="retry_rewritten_query",
         )
+        hyde_passage = await generate_hyde_passage(message, rewritten_query)
+        hyde_matches = []
+        if hyde_passage:
+            hyde_matches = retrieve_document_contexts(
+                documents,
+                hyde_passage,
+                retrieval_path="hyde_passage",
+            )
+
+        query_variants = await generate_query_variants(message, rewritten_query, grade)
+        variant_matches = []
+        for index, query_variant in enumerate(query_variants, start=1):
+            variant_matches.extend(
+                retrieve_document_contexts(
+                    documents,
+                    query_variant,
+                    retrieval_path=f"query_variant_{index}",
+                    limit=QUERY_VARIANT_RETRIEVAL_K,
+                )
+            )
+
+        context_pool = [
+            *original_matches,
+            *rewritten_retry_matches,
+            *hyde_matches,
+            *variant_matches,
+        ]
+        context_pool_count = len(context_pool)
+        corrective_retrieval_counts = {
+            "original_query": len(original_matches),
+            "rewritten_query": len(rewritten_retry_matches),
+            "hyde": len(hyde_matches),
+            "query_variants": len(variant_matches),
+        }
         candidate_matches = dedupe_matches(
-            [*original_matches, *rewritten_retry_matches],
+            context_pool,
             limit=RETRIEVAL_K,
         )
         logger.info(
-            "crag_corrective_retry grade=%s original_chunks=%s rewritten_chunks=%s deduped_final_chunks=%s",
+            "crag_corrective_retry grade=%s original_chunks=%s rewritten_chunks=%s hyde_chunks=%s variant_chunks=%s variants=%s context_pool=%s deduped_final_chunks=%s",
             grade_value,
             len(original_matches),
             len(rewritten_retry_matches),
+            len(hyde_matches),
+            len(variant_matches),
+            len(query_variants),
+            context_pool_count,
             len(candidate_matches),
         )
     else:
@@ -154,6 +198,10 @@ async def run_basic_crag_loop(message: str, documents: list[dict]) -> dict:
         "rewritten_query": rewritten_query,
         "grade": grade,
         "corrective_retry": corrective_retry,
+        "hyde_passage": hyde_passage,
+        "query_variants": query_variants,
+        "corrective_retrieval_counts": corrective_retrieval_counts,
+        "context_pool_count": context_pool_count,
         "matches": candidate_matches,
     }
 
@@ -262,6 +310,119 @@ Retrieved context:
     }
 
 
+async def generate_hyde_passage(original_query: str, rewritten_query: str) -> str:
+    prompt = f"""Write a short hypothetical source passage that would directly answer the user's query.
+
+Use the style of factual document text. Do not say this is hypothetical. Do not answer conversationally.
+Return only the passage, in 3-5 sentences.
+
+Original query:
+{original_query}
+
+Retrieval query:
+{rewritten_query}
+"""
+    config = types.GenerateContentConfig(
+        temperature=0.2,
+    )
+    gateway = get_gemini_gateway()
+
+    try:
+        result = await gateway.generate_content(
+            step="hyde_passage",
+            models=preferred_crag_models(),
+            contents=prompt,
+            config=config,
+            timeout_seconds=CRAG_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("crag_hyde_failed error=%s", exc)
+        return ""
+
+    passage = (result.response.text or "").strip()
+    logger.info(
+        "crag_hyde_complete model=%s key_index=%s passage_chars=%s",
+        result.model,
+        result.key_index,
+        len(passage),
+    )
+    return passage
+
+
+async def generate_query_variants(
+    original_query: str,
+    rewritten_query: str,
+    grade: dict,
+) -> list[str]:
+    prompt = f"""Generate focused semantic retrieval query variants for the user's query.
+
+Return compact JSON only:
+{{"variants":["variant 1","variant 2","variant 3"]}}
+
+Rules:
+- Return exactly {QUERY_VARIANT_COUNT} variants.
+- Keep each variant under 14 words.
+- Preserve the user's intent.
+- Emphasize missing details implied by the retrieval grade rationale.
+- Do not include numbering.
+
+Original query:
+{original_query}
+
+Current rewritten query:
+{rewritten_query}
+
+Retrieval grade: {grade["grade"]}
+Rationale: {grade["rationale"]}
+"""
+    config = types.GenerateContentConfig(
+        temperature=0.2,
+        response_mime_type="application/json",
+    )
+    gateway = get_gemini_gateway()
+
+    try:
+        result = await gateway.generate_content(
+            step="query_variants",
+            models=preferred_crag_models(),
+            contents=prompt,
+            config=config,
+            timeout_seconds=CRAG_TIMEOUT_SECONDS,
+        )
+        parsed = parse_json_object(result.response.text or "")
+    except Exception as exc:
+        logger.warning("crag_query_variants_failed error=%s", exc)
+        return []
+
+    variants = parsed.get("variants", [])
+    if not isinstance(variants, list):
+        return []
+
+    cleaned_variants = []
+    seen = {original_query.casefold(), rewritten_query.casefold()}
+    for variant in variants:
+        cleaned = str(variant).strip().strip('"')
+        if not cleaned:
+            continue
+
+        key = cleaned.casefold()
+        if key in seen:
+            continue
+
+        seen.add(key)
+        cleaned_variants.append(cleaned)
+        if len(cleaned_variants) >= QUERY_VARIANT_COUNT:
+            break
+
+    logger.info(
+        "crag_query_variants_complete model=%s key_index=%s variants=%s",
+        result.model,
+        result.key_index,
+        len(cleaned_variants),
+    )
+    return cleaned_variants
+
+
 def parse_json_object(value: str) -> dict:
     cleaned = value.strip()
     if cleaned.startswith("```"):
@@ -280,16 +441,22 @@ def retrieve_document_contexts(
     documents: list[dict],
     message: str,
     retrieval_path: str,
+    limit: int = RETRIEVAL_K,
 ) -> list[dict]:
     matches = []
 
     for document in documents:
         filename = document.get("filename", "uploaded document")
-        for match in retrieve_context(document, message, retrieval_path=retrieval_path):
+        for match in retrieve_context(
+            document,
+            message,
+            limit=limit,
+            retrieval_path=retrieval_path,
+        ):
             match["filename"] = filename
             matches.append(match)
 
-    return sorted(matches, key=lambda match: match["score"])[:RETRIEVAL_K]
+    return sorted(matches, key=lambda match: match["score"])[:limit]
 
 
 def dedupe_matches(matches: list[dict], limit: int) -> list[dict]:
@@ -365,6 +532,11 @@ def format_crag_metadata(crag_result: dict) -> dict:
         "retrieval_grade": grade["grade"],
         "retrieval_rationale": grade["rationale"],
         "corrective_retry": crag_result["corrective_retry"],
+        "hyde_used": bool(crag_result["hyde_passage"]),
+        "hyde_passage": crag_result["hyde_passage"],
+        "query_variants": crag_result["query_variants"],
+        "corrective_retrieval_counts": crag_result["corrective_retrieval_counts"],
+        "context_pool_count": crag_result["context_pool_count"],
         "final_source_count": len(crag_result["matches"]),
     }
 
