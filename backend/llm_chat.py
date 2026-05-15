@@ -2,9 +2,9 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from google import genai
 from google.genai import types
 
+from .gemini_gateway import get_gemini_gateway
 from .rag_pipeline import RETRIEVAL_K, retrieve_context
 
 
@@ -34,7 +34,7 @@ async def chat_with_llm(message: str, documents: list[dict]) -> dict:
     context = format_context(matches)
     source_names = ", ".join(document.get("filename", "uploaded document") for document in documents)
     prompt = build_user_prompt(message, context, source_names)
-    client = create_client()
+    gateway = get_gemini_gateway()
 
     logger.info(
         "rag_context document_ids=%s filenames=%s retrieved_chunks=%s context_chars=%s",
@@ -44,51 +44,45 @@ async def chat_with_llm(message: str, documents: list[dict]) -> dict:
         len(context),
     )
 
-    last_error: Exception | None = None
-    for model in unique_models(GEMINI_MODELS):
-        try:
-            config = types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.2,
-            )
-            token_count = await count_prompt_tokens(client, model, prompt, config)
-            logger.info(
-                "gemini_request model=%s prompt_tokens=%s prompt_chars=%s",
-                model,
-                token_count,
-                len(prompt),
-            )
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        temperature=0.2,
+    )
+    first_model = unique_models(GEMINI_MODELS)[0]
+    token_count = await gateway.count_tokens(
+        step="final_answer",
+        model=first_model,
+        contents=prompt,
+        config=config,
+    )
+    logger.info(
+        "gemini_request step=final_answer preferred_model=%s prompt_tokens=%s prompt_chars=%s",
+        first_model,
+        token_count,
+        len(prompt),
+    )
 
-            response = await client.aio.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=config,
-            )
-            usage = response.usage_metadata
-            logger.info(
-                "gemini_response model=%s prompt_tokens=%s output_tokens=%s total_tokens=%s",
-                model,
-                getattr(usage, "prompt_token_count", None),
-                getattr(usage, "candidates_token_count", None),
-                getattr(usage, "total_token_count", None),
-            )
-            return {
-                "answer": response.text or "The model returned an empty response.",
-                "sources": format_sources(matches),
-            }
-        except Exception as exc:
-            last_error = exc
-            logger.exception("gemini_model_failed model=%s error=%s", model, exc)
+    result = await gateway.generate_content(
+        step="final_answer",
+        models=GEMINI_MODELS,
+        contents=prompt,
+        config=config,
+    )
+    response = result.response
+    usage = response.usage_metadata
+    logger.info(
+        "gemini_response step=final_answer model=%s key_index=%s prompt_tokens=%s output_tokens=%s total_tokens=%s",
+        result.model,
+        result.key_index,
+        getattr(usage, "prompt_token_count", None),
+        getattr(usage, "candidates_token_count", None),
+        getattr(usage, "total_token_count", None),
+    )
 
-    raise RuntimeError(f"All Gemini model attempts failed: {last_error}") from last_error
-
-
-def create_client() -> genai.Client:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key or api_key == "your_gemini_api_key_here":
-        raise RuntimeError("GEMINI_API_KEY is missing. Add it to .env.")
-
-    return genai.Client(api_key=api_key)
+    return {
+        "answer": response.text or "The model returned an empty response.",
+        "sources": format_sources(matches),
+    }
 
 
 def retrieve_document_contexts(documents: list[dict], message: str) -> list[dict]:
@@ -142,24 +136,6 @@ def format_sources(matches: list[dict]) -> list[dict]:
         )
 
     return sources
-
-
-async def count_prompt_tokens(
-    client: genai.Client,
-    model: str,
-    prompt: str,
-    config: types.GenerateContentConfig,
-) -> int | None:
-    try:
-        count = await client.aio.models.count_tokens(
-            model=model,
-            contents=prompt,
-            config=config,
-        )
-        return getattr(count, "total_tokens", None)
-    except Exception as exc:
-        logger.warning("gemini_token_count_failed model=%s error=%s", model, exc)
-        return None
 
 
 def unique_models(models: list[str]) -> list[str]:

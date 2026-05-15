@@ -101,6 +101,8 @@ const API_BASE_URL = "http://127.0.0.1:8000";
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
+# Optional comma-separated pool. If set, the backend rotates to the next key on 429/503.
+GEMINI_API_KEYS=your_first_key_here,your_second_key_here
 GEMINI_MODEL=gemini-flash-latest
 
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
@@ -117,6 +119,8 @@ VECTOR_METADATA_BYTES_PER_CHUNK=2048
 ```
 
 The storage settings are intentionally visible because generated files can be much larger than the uploaded file. A compressed PDF may upload as a small file but expand into much more extracted text and index data.
+
+`GEMINI_API_KEYS` is optional. When multiple keys are configured, the backend keeps using the current key until Gemini returns a retryable `429` or `503`, then switches to the next key in a circular pool. Logs include the current step, model, and key index, but never print the key itself.
 
 ## RAG Strategy
 
@@ -193,9 +197,3 @@ The chat response includes `answer` and `sources`. Each source contains the docu
 - Railway volume storage can still fill up if many large files are uploaded, but removing a source from the UI also deletes its backend files.
 - Legacy `.doc` parsing is best-effort because old Word files are messy without heavier conversion tooling.
 - The local sentence embedding model improves retrieval quality but increases install size and first-run model loading time.
-
-## Security Notes
-
-Do not commit `.env`. The `.gitignore` already excludes it.
-
-If an API key was ever pasted into chat, logs, screenshots, or a public repo, rotate it. Treat it as exposed.
