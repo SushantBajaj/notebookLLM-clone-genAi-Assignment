@@ -16,6 +16,8 @@ const chatForm = document.querySelector("#chatForm");
 const chatInput = document.querySelector("#chatInput");
 const sendButton = document.querySelector("#sendButton");
 
+const sessionId = crypto.randomUUID();
+
 let documents = [];
 let selectedDocumentIds = new Set();
 let isThinking = false;
@@ -350,6 +352,7 @@ async function uploadDocument(file) {
     headers: {
       "Content-Type": file.type || "application/octet-stream",
       "X-Filename": encodeURIComponent(file.name),
+      "X-Session-Id": sessionId,
     },
     body: file,
   });
@@ -404,6 +407,21 @@ async function fetchDocumentChunks(documentId) {
   }
 
   return response.json();
+}
+
+function cleanupSession() {
+  if (!documents.length) return;
+
+  const cleanupUrl = `${API_BASE_URL}/sessions/${encodeURIComponent(sessionId)}/cleanup`;
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon(cleanupUrl);
+    return;
+  }
+
+  fetch(cleanupUrl, {
+    method: "POST",
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function validateFile(file) {
@@ -474,6 +492,8 @@ async function handleSelectedFiles(fileList) {
 documentInput.addEventListener("change", (event) => {
   handleSelectedFiles(event.target.files);
 });
+
+window.addEventListener("pagehide", cleanupSession);
 
 documentList.addEventListener("change", (event) => {
   if (!event.target.classList.contains("document-check")) return;

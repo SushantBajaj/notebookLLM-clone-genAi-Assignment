@@ -1,6 +1,6 @@
 from pathlib import Path
 from urllib.parse import unquote
-from uuid import uuid4
+from uuid import UUID, uuid4
 import json
 import logging
 import os
@@ -148,6 +148,21 @@ def document_paths(document_id: str) -> dict[str, Path]:
     }
 
 
+def validate_session_id(session_id: str) -> str:
+    try:
+        return str(UUID(session_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid session id.") from exc
+
+
+def get_upload_session_id(request: Request) -> str:
+    session_id = request.headers.get("x-session-id", "").strip()
+    if not session_id:
+        return str(uuid4())
+
+    return validate_session_id(session_id)
+
+
 def load_metadata(document_id: str) -> dict:
     paths = document_paths(document_id)
     if not paths["metadata"].exists():
@@ -177,6 +192,7 @@ def health_check() -> dict[str, str]:
 @app.post("/upload")
 async def upload_document(request: Request) -> dict:
     filename = unquote(request.headers.get("x-filename", "")).strip()
+    session_id = get_upload_session_id(request)
     safe_filename = Path(filename).name
     extension = get_file_extension(safe_filename)
 
@@ -200,6 +216,7 @@ async def upload_document(request: Request) -> dict:
 
     metadata = {
         "document_id": document_id,
+        "session_id": session_id,
         "filename": safe_filename,
         "content_type": request.headers.get("content-type"),
         "extension": extension,
@@ -250,6 +267,29 @@ async def delete_document(document_id: str) -> dict[str, str]:
 
     shutil.rmtree(paths["dir"], ignore_errors=True)
     return {"document_id": document_id, "message": "Document removed."}
+
+
+@app.post("/sessions/{session_id}/cleanup")
+async def cleanup_session(session_id: str) -> dict[str, int | str]:
+    session_id = validate_session_id(session_id)
+    removed_count = 0
+
+    for metadata_path in DOCUMENTS_DIR.glob("*/metadata.json"):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        if metadata.get("session_id") != session_id:
+            continue
+
+        shutil.rmtree(metadata_path.parent, ignore_errors=True)
+        removed_count += 1
+
+    return {
+        "session_id": session_id,
+        "removed_count": removed_count,
+    }
 
 
 @app.get("/documents/{document_id}/chunks")
