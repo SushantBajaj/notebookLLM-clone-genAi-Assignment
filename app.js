@@ -1,7 +1,7 @@
 const allowedExtensions = new Set(["pdf", "doc", "docx", "csv"]);
 // Swap this to http://127.0.0.1:8000 when running the backend locally.
 // const API_BASE_URL = "https://notebookllm-clone-genai-assignment-production-aaf3.up.railway.app";
-const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = "http://127.0.0.1:8001";
 
 const documentInput = document.querySelector("#documentInput");
 const uploadZone = document.querySelector("#uploadZone");
@@ -308,11 +308,59 @@ function renderSources(sources) {
             <strong>${escapeHtml(source.filename)} · Chunk ${source.chunk_index + 1}</strong>
             <button class="source-text-toggle" type="button">Show text</button>
           </div>
+          ${renderSourcePaths(source.retrieval_paths)}
           <p hidden>${escapeHtml(source.text)}</p>
         </section>
       `).join("")}
     </div>
   `;
+}
+
+function renderSourcePaths(paths = []) {
+  const pathLabels = paths.map(formatRetrievalPath).filter(Boolean);
+  if (!pathLabels.length) return "";
+
+  return `<small class="source-paths">${pathLabels.map(escapeHtml).join(" + ")}</small>`;
+}
+
+function formatRetrievalPath(path) {
+  const labels = {
+    initial_rewritten_query: "Initial rewrite",
+    retry_original_query: "Retry original",
+    retry_rewritten_query: "Retry rewrite",
+    semantic: "Semantic",
+  };
+  return labels[path] || path;
+}
+
+function renderCragDetails(crag) {
+  if (!crag?.rewritten_query) return "";
+
+  const grade = crag.retrieval_grade || "unknown";
+  const retryText = crag.corrective_retry ? "Corrective retry used" : "Initial context used";
+  const sourceCount = Number.isFinite(crag.final_source_count) ? crag.final_source_count : 0;
+
+  return `
+    <button class="query-crag-toggle" type="button" aria-expanded="false">
+      Info
+    </button>
+    <div class="query-crag" hidden>
+      <small>Retrieval grade: ${escapeHtml(grade)}</small>
+      <small>${escapeHtml(retryText)} · ${sourceCount} final source${sourceCount === 1 ? "" : "s"}</small>
+      ${crag.retrieval_rationale ? `<small>${escapeHtml(crag.retrieval_rationale)}</small>` : ""}
+      <details class="rewritten-query">
+        <summary>Show rewritten query</summary>
+        <p>${escapeHtml(crag.rewritten_query)}</p>
+      </details>
+    </div>
+  `;
+}
+
+function attachCragDetails(message, crag) {
+  const details = renderCragDetails(crag);
+  if (!details) return;
+
+  message.insertAdjacentHTML("beforeend", details);
 }
 
 function addMessage(role, content, sources = []) {
@@ -321,7 +369,7 @@ function addMessage(role, content, sources = []) {
   message.innerHTML = role === "assistant" ? renderMarkdown(content) : `<p>${escapeHtml(content)}</p>`;
   if (role === "assistant" && sources.length) {
     message.innerHTML += `
-      <button class="sources-toggle" type="button">Show sources</button>
+      <button class="sources-toggle" type="button">Show ${sources.length} source${sources.length === 1 ? "" : "s"}</button>
       ${renderSources(sources)}
     `;
   }
@@ -576,6 +624,7 @@ chatForm.addEventListener("submit", (event) => {
   historyIndex = -1;
   draftMessage = "";
   addMessage("user", question);
+  const userMessage = messages.lastElementChild;
   chatInput.value = "";
   isThinking = true;
   setChatEnabled(Boolean(selectedDocumentIds.size));
@@ -584,6 +633,7 @@ chatForm.addEventListener("submit", (event) => {
   askDocument(question)
     .then((result) => {
       typingMessage.remove();
+      attachCragDetails(userMessage, result.crag);
       addMessage("assistant", result.answer, result.sources || []);
     })
     .catch((error) => {
@@ -622,6 +672,18 @@ chatInput.addEventListener("keydown", (event) => {
 });
 
 messages.addEventListener("click", (event) => {
+  const cragToggle = event.target.closest(".query-crag-toggle");
+  if (cragToggle) {
+    const cragPanel = cragToggle.nextElementSibling;
+    if (!cragPanel) return;
+
+    const isOpening = cragPanel.hidden;
+    cragPanel.hidden = !isOpening;
+    cragToggle.setAttribute("aria-expanded", String(isOpening));
+    cragToggle.textContent = isOpening ? "Close info" : "Info";
+    return;
+  }
+
   const sourceTextToggle = event.target.closest(".source-text-toggle");
   if (sourceTextToggle) {
     const sourceText = sourceTextToggle.closest(".source-snippet")?.querySelector("p");
@@ -640,12 +702,18 @@ messages.addEventListener("click", (event) => {
   const isOpening = sourcePanel.hidden;
   if (openSourcesMessage && openSourcesMessage !== sourcePanel) {
     openSourcesMessage.hidden = true;
-    openSourcesMessage.previousElementSibling.textContent = "Show sources";
+    openSourcesMessage.previousElementSibling.textContent = getSourcesToggleLabel(openSourcesMessage, false);
   }
   sourcePanel.hidden = !isOpening;
-  toggle.textContent = isOpening ? "Hide sources" : "Show sources";
+  toggle.textContent = getSourcesToggleLabel(sourcePanel, isOpening);
   openSourcesMessage = isOpening ? sourcePanel : null;
 });
+
+function getSourcesToggleLabel(sourcePanel, isOpen) {
+  const sourceCount = sourcePanel.querySelectorAll(".source-snippet").length;
+  const label = `${sourceCount} source${sourceCount === 1 ? "" : "s"}`;
+  return `${isOpen ? "Hide" : "Show"} ${label}`;
+}
 
 ["dragenter", "dragover"].forEach((eventName) => {
   uploadZone.addEventListener(eventName, (event) => {

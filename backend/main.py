@@ -351,4 +351,5 @@ async def chat(request: ChatRequest) -> dict:
         "document_ids": document_ids,
         "answer": result["answer"],
         "sources": result["sources"],
+        "crag": result.get("crag", {}),
     }

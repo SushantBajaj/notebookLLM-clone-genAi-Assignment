@@ -2,7 +2,7 @@
 
 A small NotebookLM-style assignment project: upload documents, let the backend parse and index them, then ask questions grounded in those sources.
 
-The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The backend extracts text from PDF, DOC, DOCX, or CSV files, chunks the text, stores a local FAISS index, retrieves relevant chunks, and asks Gemini to answer using that context.
+The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The backend extracts text from PDF, DOC, DOCX, or CSV files, chunks the text, stores a local FAISS index, runs a basic CRAG retrieval loop, and asks Gemini to answer using only the final selected context.
 
 ## What It Does
 
@@ -10,6 +10,7 @@ The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The back
 - Lets users choose the current chat scope with checkboxes in the sidebar.
 - Lets users inspect document chunks from the sidebar.
 - Shows the exact retrieved source chunks behind each answer.
+- Runs a basic CRAG with query rewriting, retrieval grading, and one corrective retrieval branch.
 - Supports PDF, DOC, DOCX, and CSV files.
 - Extracts readable text from the uploaded file.
 - Splits the text into semantic chunks for retrieval.
@@ -23,7 +24,8 @@ The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The back
 - The sidebar keeps long filenames, metadata, document actions, and chunk controls contained in compact source cards.
 - Each uploaded source has an `Inspect` control for browsing chunk numbers and previewing one chunk at a time.
 - Assistant answers can show their retrieved sources without dumping all source text at once.
-- Source cards inside answers show the document name and chunk number first, with a separate text toggle for the exact retrieved chunk.
+- Source cards inside answers show the final selected context only, capped at 12 chunks, with retrieval path metadata for how each chunk was found.
+- User messages include a quiet `Info` control that can reveal the retrieval grade, corrective retry status, final source count, grader rationale, and rewritten query.
 - In the chat composer, `Shift + Up` recalls previously sent prompts and `Shift + Down` moves forward through that history back toward the current draft.
 
 ## Project Structure
@@ -39,7 +41,8 @@ The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The back
     ├── main.py                # FastAPI routes: health, upload, chat
     ├── document_parser.py     # PDF/DOC/DOCX/CSV text extraction
     ├── rag_pipeline.py        # Chunking, embeddings, FAISS indexing/retrieval
-    ├── llm_chat.py            # Gemini prompt + response flow
+    ├── llm_chat.py            # CRAG loop, prompts, final answer response flow
+    ├── gemini_gateway.py      # Gemini API wrapper, key rotation, timeouts
     ├── requirements.txt       # Backend dependency list
     └── data/                  # Uploaded files, metadata, extracted text, indexes
 ```
@@ -104,6 +107,9 @@ GEMINI_API_KEY=your_gemini_api_key_here
 # Optional comma-separated pool. If set, the backend rotates to the next key on 429/503.
 GEMINI_API_KEYS=your_first_key_here,your_second_key_here
 GEMINI_MODEL=gemini-flash-latest
+CRAG_MODEL=gemini-2.5-flash-lite
+CRAG_TIMEOUT_SECONDS=20
+GEMINI_TIMEOUT_SECONDS=90
 
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 EMBEDDING_DIMENSIONS=384
@@ -122,6 +128,8 @@ The storage settings are intentionally visible because generated files can be mu
 
 `GEMINI_API_KEYS` is optional. When multiple keys are configured, the backend keeps using the current key until Gemini returns a retryable `429` or `503`, then switches to the next key in a circular pool. Logs include the current step, model, and key index, but never print the key itself.
 
+`GEMINI_MODEL` controls the final answer model and keeps `gemini-flash-latest` as the preferred default. `CRAG_MODEL` is separate and is used only for query rewriting and retrieval grading. `CRAG_TIMEOUT_SECONDS` prevents rewrite/grading calls from hanging the chat; if grading times out or fails, the backend falls back to a weak grade when chunks exist so the corrective branch still runs. `GEMINI_TIMEOUT_SECONDS` is the default timeout for other Gemini generation calls.
+
 ## RAG Strategy
 
 The RAG pipeline uses LangChain's `SemanticChunker` in [backend/rag_pipeline.py](backend/rag_pipeline.py). The current settings are:
@@ -137,8 +145,27 @@ RETRIEVAL_K = 12
 
 Semantic chunking embeds sentence groups and starts a new chunk when adjacent text becomes meaningfully different. The percentile threshold keeps splits focused on stronger topic shifts instead of fixed character counts.
 
-At chat time, the backend retrieves matching chunks from each checked source, sorts them by similarity, and sends the top 12 chunks overall to Gemini. This keeps prompts smaller and keeps answers grounded in the selected files instead of every full document being sent every time.
+At chat time, the backend runs a basic CRAG loop before final answer generation:
 
+1. Rewrite the user's query for semantic retrieval.
+2. Retrieve the initial top 12 chunks with the rewritten query.
+3. Grade whether that context is good, weak, or bad for the original query.
+4. If the grade is weak or bad, retry retrieval with both the original and rewritten query.
+5. Deduplicate by document id and chunk index, then send only the final top 12 chunks to Gemini.
+
+This is a single corrective pass, not an unbounded retry loop. If the first retrieval grade is `good`, the initial rewritten-query results are used. If the grade is `weak` or `bad`, the backend retrieves once with both the original and rewritten query, merges those candidates, deduplicates them, and sends only the final selected top 12 chunks to Gemini.
+
+The final answer model still uses `GEMINI_MODEL` and its existing fallback list. `CRAG_MODEL` is only for query rewriting and retrieval grading.
+
+The `/chat` response includes CRAG metadata for the frontend `Info` control:
+
+- `rewritten_query`
+- `retrieval_grade`
+- `retrieval_rationale`
+- `corrective_retry`
+- `final_source_count`
+
+Each returned source can also include `retrieval_paths`, such as `initial_rewritten_query`, `retry_original_query`, or `retry_rewritten_query`.
 
 ## Storage Behavior
 
@@ -189,7 +216,7 @@ POST /chat
 }
 ```
 
-The chat response includes `answer` and `sources`. Each source contains the document name, chunk number, and exact chunk text used as retrieved context.
+The chat response includes `answer`, `sources`, and `crag`. Each source contains the document name, chunk number, exact chunk text used as retrieved context, similarity score, and retrieval path metadata. The frontend renders only those final selected sources, not all intermediate retry candidates.
 
 ## Limitations
 

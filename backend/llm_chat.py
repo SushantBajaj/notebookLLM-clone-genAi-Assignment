@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 
 from dotenv import load_dotenv
@@ -28,20 +29,34 @@ GEMINI_MODELS = [
     "gemini-2.0-flash-lite",
 ]
 
+CRAG_MODELS = [
+    os.getenv("CRAG_MODEL", "gemini-2.5-flash-lite"),
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+]
+
+CRAG_WEAK_GRADES = {"weak", "bad"}
+CRAG_TIMEOUT_SECONDS = int(os.getenv("CRAG_TIMEOUT_SECONDS", "20"))
+
 
 async def chat_with_llm(message: str, documents: list[dict]) -> dict:
-    matches = retrieve_document_contexts(documents, message)
+    crag_result = await run_basic_crag_loop(message, documents)
+    matches = crag_result["matches"]
     context = format_context(matches)
     source_names = ", ".join(document.get("filename", "uploaded document") for document in documents)
     prompt = build_user_prompt(message, context, source_names)
     gateway = get_gemini_gateway()
 
     logger.info(
-        "rag_context document_ids=%s filenames=%s retrieved_chunks=%s context_chars=%s",
+        "rag_context document_ids=%s filenames=%s retrieved_chunks=%s context_chars=%s rewritten_query=%s grade=%s corrective_retry=%s",
         [document.get("document_id") for document in documents],
         source_names,
         len(matches),
         len(context),
+        crag_result["rewritten_query"],
+        crag_result["grade"]["grade"],
+        crag_result["corrective_retry"],
     )
 
     config = types.GenerateContentConfig(
@@ -82,19 +97,223 @@ async def chat_with_llm(message: str, documents: list[dict]) -> dict:
     return {
         "answer": response.text or "The model returned an empty response.",
         "sources": format_sources(matches),
+        "crag": format_crag_metadata(crag_result),
     }
 
 
-def retrieve_document_contexts(documents: list[dict], message: str) -> list[dict]:
+async def run_basic_crag_loop(message: str, documents: list[dict]) -> dict:
+    rewritten_query = await rewrite_query(message)
+    initial_matches = retrieve_document_contexts(
+        documents,
+        rewritten_query,
+        retrieval_path="initial_rewritten_query",
+    )
+    logger.info(
+        "crag_initial_retrieval original_query_chars=%s rewritten_query_chars=%s chunks=%s",
+        len(message),
+        len(rewritten_query),
+        len(initial_matches),
+    )
+
+    grade = await grade_retrieved_context(message, rewritten_query, initial_matches)
+    grade_value = grade["grade"]
+    corrective_retry = grade_value in CRAG_WEAK_GRADES
+    candidate_matches = initial_matches
+
+    if corrective_retry:
+        original_matches = retrieve_document_contexts(
+            documents,
+            message,
+            retrieval_path="retry_original_query",
+        )
+        rewritten_retry_matches = retrieve_document_contexts(
+            documents,
+            rewritten_query,
+            retrieval_path="retry_rewritten_query",
+        )
+        candidate_matches = dedupe_matches(
+            [*original_matches, *rewritten_retry_matches],
+            limit=RETRIEVAL_K,
+        )
+        logger.info(
+            "crag_corrective_retry grade=%s original_chunks=%s rewritten_chunks=%s deduped_final_chunks=%s",
+            grade_value,
+            len(original_matches),
+            len(rewritten_retry_matches),
+            len(candidate_matches),
+        )
+    else:
+        candidate_matches = dedupe_matches(candidate_matches, limit=RETRIEVAL_K)
+        logger.info(
+            "crag_context_accepted grade=%s final_chunks=%s",
+            grade_value,
+            len(candidate_matches),
+        )
+
+    return {
+        "rewritten_query": rewritten_query,
+        "grade": grade,
+        "corrective_retry": corrective_retry,
+        "matches": candidate_matches,
+    }
+
+
+async def rewrite_query(message: str) -> str:
+    prompt = f"""Rewrite the user query for semantic document retrieval.
+
+Return only the rewritten query. Preserve the user's meaning, key entities, and constraints.
+
+User query:
+{message}
+"""
+    config = types.GenerateContentConfig(
+        temperature=0.1,
+    )
+    gateway = get_gemini_gateway()
+
+    try:
+        result = await gateway.generate_content(
+            step="query_rewrite",
+            models=preferred_crag_models(),
+            contents=prompt,
+            config=config,
+            timeout_seconds=CRAG_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("crag_query_rewrite_failed error=%s", exc)
+        return message
+
+    rewritten_query = (result.response.text or "").strip().strip('"')
+    if not rewritten_query:
+        logger.warning("crag_query_rewrite_empty using_original_query=true")
+        return message
+
+    logger.info(
+        "crag_query_rewrite_complete model=%s key_index=%s original_chars=%s rewritten_chars=%s",
+        result.model,
+        result.key_index,
+        len(message),
+        len(rewritten_query),
+    )
+    return rewritten_query
+
+
+async def grade_retrieved_context(
+    original_query: str,
+    rewritten_query: str,
+    matches: list[dict],
+) -> dict:
+    prompt = f"""Grade whether the retrieved document context can answer the user's query.
+
+Return compact JSON only:
+{{"grade":"good|weak|bad","rationale":"short reason"}}
+
+Use:
+- good: the context likely contains enough direct evidence to answer.
+- weak: the context is related but incomplete, indirect, or missing important parts.
+- bad: the context is mostly irrelevant or empty.
+
+Original query:
+{original_query}
+
+Rewritten query:
+{rewritten_query}
+
+Retrieved context:
+{format_context(matches)}
+"""
+    config = types.GenerateContentConfig(
+        temperature=0,
+        response_mime_type="application/json",
+    )
+    gateway = get_gemini_gateway()
+
+    try:
+        result = await gateway.generate_content(
+            step="retrieval_grade",
+            models=preferred_crag_models(),
+            contents=prompt,
+            config=config,
+            timeout_seconds=CRAG_TIMEOUT_SECONDS,
+        )
+        parsed = parse_json_object(result.response.text or "")
+    except Exception as exc:
+        logger.warning("crag_retrieval_grade_failed error=%s using_fallback_grade=true", exc)
+        return {
+            "grade": "weak" if matches else "bad",
+            "rationale": "Used fallback grading because the retrieval grader did not return usable JSON.",
+        }
+
+    grade = str(parsed.get("grade", "")).strip().lower()
+    if grade not in {"good", "weak", "bad"}:
+        grade = "weak" if matches else "bad"
+
+    rationale = str(parsed.get("rationale", "")).strip()
+    logger.info(
+        "crag_retrieval_grade_complete model=%s key_index=%s grade=%s rationale=%s",
+        result.model,
+        result.key_index,
+        grade,
+        rationale,
+    )
+    return {
+        "grade": grade,
+        "rationale": rationale or "No rationale returned by retrieval grader.",
+    }
+
+
+def parse_json_object(value: str) -> dict:
+    cleaned = value.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").strip()
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+
+    return json.loads(cleaned)
+
+
+def preferred_crag_models() -> list[str]:
+    return unique_models(CRAG_MODELS)[:1]
+
+
+def retrieve_document_contexts(
+    documents: list[dict],
+    message: str,
+    retrieval_path: str,
+) -> list[dict]:
     matches = []
 
     for document in documents:
         filename = document.get("filename", "uploaded document")
-        for match in retrieve_context(document, message):
+        for match in retrieve_context(document, message, retrieval_path=retrieval_path):
             match["filename"] = filename
             matches.append(match)
 
     return sorted(matches, key=lambda match: match["score"])[:RETRIEVAL_K]
+
+
+def dedupe_matches(matches: list[dict], limit: int) -> list[dict]:
+    deduped = {}
+
+    for match in sorted(matches, key=lambda item: item["score"]):
+        metadata = match.get("metadata", {})
+        key = (
+            metadata.get("document_id"),
+            metadata.get("chunk_index"),
+        )
+        if key not in deduped:
+            deduped[key] = {
+                **match,
+                "retrieval_paths": [match.get("retrieval_path", "semantic")],
+            }
+            continue
+
+        existing = deduped[key]
+        retrieval_path = match.get("retrieval_path", "semantic")
+        if retrieval_path not in existing["retrieval_paths"]:
+            existing["retrieval_paths"].append(retrieval_path)
+
+    return sorted(deduped.values(), key=lambda match: match["score"])[:limit]
 
 
 def build_user_prompt(message: str, context: str, source_names: str) -> str:
@@ -132,10 +351,22 @@ def format_sources(matches: list[dict]) -> list[dict]:
                 "chunk_index": metadata.get("chunk_index", 0),
                 "text": match["text"],
                 "score": match["score"],
+                "retrieval_paths": match.get("retrieval_paths") or [match.get("retrieval_path", "semantic")],
             }
         )
 
     return sources
+
+
+def format_crag_metadata(crag_result: dict) -> dict:
+    grade = crag_result["grade"]
+    return {
+        "rewritten_query": crag_result["rewritten_query"],
+        "retrieval_grade": grade["grade"],
+        "retrieval_rationale": grade["rationale"],
+        "corrective_retry": crag_result["corrective_retry"],
+        "final_source_count": len(crag_result["matches"]),
+    }
 
 
 def unique_models(models: list[str]) -> list[str]:

@@ -151,5 +151,14 @@ def chunk_text(text: str, config: ChunkingConfig | None = None) -> list[str]:
     return splitter.split_text(text)
 
 
-def retrieve_context(document: dict, question: str, limit: int = RETRIEVAL_K) -> list[dict]:
-    return get_retrieval_strategy().retrieve(document, question, limit)
+def retrieve_context(
+    document: dict,
+    question: str,
+    limit: int = RETRIEVAL_K,
+    retrieval_path: str = "semantic",
+) -> list[dict]:
+    matches = get_retrieval_strategy().retrieve(document, question, limit)
+    for match in matches:
+        match["retrieval_path"] = retrieval_path
+
+    return matches

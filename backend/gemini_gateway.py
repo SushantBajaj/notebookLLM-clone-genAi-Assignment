@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 from dataclasses import dataclass
 from functools import lru_cache
 from threading import Lock
@@ -15,6 +16,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = {429, 503}
+DEFAULT_GEMINI_TIMEOUT_SECONDS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "90"))
 
 
 @dataclass(frozen=True)
@@ -39,23 +41,43 @@ class GeminiGateway:
         models: list[str],
         contents: str,
         config: types.GenerateContentConfig,
+        timeout_seconds: int = DEFAULT_GEMINI_TIMEOUT_SECONDS,
     ) -> GeminiResult:
         last_error: Exception | None = None
 
         for model in unique_values(models):
             for _attempt in range(len(self.api_keys)):
                 key_index = self.current_key_index()
-                logger.info("gemini_step step=%s model=%s key_index=%s", step, model, key_index)
+                logger.info(
+                    "gemini_step step=%s model=%s key_index=%s timeout_seconds=%s",
+                    step,
+                    model,
+                    key_index,
+                    timeout_seconds,
+                )
 
                 try:
                     client = self.client_for_key(key_index)
-                    response = await client.aio.models.generate_content(
-                        model=model,
-                        contents=contents,
-                        config=config,
+                    response = await asyncio.wait_for(
+                        client.aio.models.generate_content(
+                            model=model,
+                            contents=contents,
+                            config=config,
+                        ),
+                        timeout=timeout_seconds,
                     )
                     logger.info("gemini_step_complete step=%s model=%s key_index=%s", step, model, key_index)
                     return GeminiResult(response=response, model=model, key_index=key_index)
+                except asyncio.TimeoutError as exc:
+                    last_error = exc
+                    logger.warning(
+                        "gemini_step_timeout step=%s model=%s key_index=%s timeout_seconds=%s",
+                        step,
+                        model,
+                        key_index,
+                        timeout_seconds,
+                    )
+                    break
                 except Exception as exc:
                     last_error = exc
                     status_code = get_status_code(exc)
@@ -96,7 +118,6 @@ class GeminiGateway:
             count = await client.aio.models.count_tokens(
                 model=model,
                 contents=contents,
-                config=config,
             )
             return getattr(count, "total_tokens", None)
         except Exception as exc:
