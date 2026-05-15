@@ -255,7 +255,25 @@ async def delete_document(document_id: str) -> dict[str, str]:
 @app.get("/documents/{document_id}/chunks")
 async def get_document_chunks(document_id: str) -> dict:
     metadata = load_metadata(document_id)
-    text_path_value = metadata.get("ingestion", {}).get("text_path")
+    ingestion = metadata.get("ingestion", {})
+    chunks_path_value = ingestion.get("chunks_path")
+    if chunks_path_value:
+        chunks_path = Path(chunks_path_value)
+        if chunks_path.exists():
+            chunks = json.loads(chunks_path.read_text(encoding="utf-8"))
+            return {
+                "document_id": document_id,
+                "filename": metadata["filename"],
+                "chunks": [
+                    {
+                        "chunk_index": index,
+                        "text": chunk,
+                    }
+                    for index, chunk in enumerate(chunks)
+                ],
+            }
+
+    text_path_value = ingestion.get("text_path")
     if not text_path_value:
         raise HTTPException(status_code=404, detail="Document chunks not found")
 

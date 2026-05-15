@@ -1,51 +1,97 @@
 from pathlib import Path
 from collections.abc import Callable
-import hashlib
-import math
-import re
+from dataclasses import dataclass
+from functools import lru_cache
+import json
+import os
+from typing import Protocol
 
 from langchain_core.embeddings import Embeddings
 from langchain_community.vectorstores import FAISS
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_huggingface import HuggingFaceEmbeddings
+from dotenv import load_dotenv
 
 from .document_parser import parse_document
 
 
-EMBEDDING_MODEL = "local-hashing-embedding"
-EMBEDDING_DIMENSIONS = 384
-# Moderate character chunks keep prompts compact; overlap preserves context at boundaries.
-CHUNK_SIZE = 900
-CHUNK_OVERLAP = 160
+load_dotenv()
+
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "384"))
+CHUNKING_STRATEGY = os.getenv("CHUNKING_STRATEGY", "semantic")
+SEMANTIC_BREAKPOINT_THRESHOLD_TYPE = os.getenv("SEMANTIC_BREAKPOINT_THRESHOLD_TYPE", "percentile")
+SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT = float(os.getenv("SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT", "90"))
+RETRIEVAL_STRATEGY = os.getenv("RETRIEVAL_STRATEGY", "similarity")
 RETRIEVAL_K = 12
 
 
-class LocalHashEmbeddings(Embeddings):
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [self._embed(text) for text in texts]
-
-    def embed_query(self, text: str) -> list[float]:
-        return self._embed(text)
-
-    def _embed(self, text: str) -> list[float]:
-        vector = [0.0] * EMBEDDING_DIMENSIONS
-        tokens = re.findall(r"[a-zA-Z0-9]+", text.lower())
-
-        for token in tokens:
-            # Stable token hashing gives us a dependency-free embedding for this assignment.
-            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-            index = int.from_bytes(digest[:4], "big") % EMBEDDING_DIMENSIONS
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            vector[index] += sign
-
-        length = math.sqrt(sum(value * value for value in vector))
-        if length == 0:
-            return vector
-
-        return [value / length for value in vector]
+@dataclass(frozen=True)
+class ChunkingConfig:
+    strategy: str = CHUNKING_STRATEGY
+    breakpoint_threshold_type: str = SEMANTIC_BREAKPOINT_THRESHOLD_TYPE
+    breakpoint_threshold_amount: float = SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT
 
 
-def get_embeddings() -> LocalHashEmbeddings:
-    return LocalHashEmbeddings()
+@dataclass(frozen=True)
+class RetrievalConfig:
+    strategy: str = RETRIEVAL_STRATEGY
+    k: int = RETRIEVAL_K
+
+
+class QueryTransformStrategy(Protocol):
+    def transform(self, question: str, document: dict) -> str:
+        ...
+
+
+class IdentityQueryTransform:
+    def transform(self, question: str, document: dict) -> str:
+        return question
+
+
+class SimilarityRetrievalStrategy:
+    def __init__(
+        self,
+        embeddings: Embeddings,
+        query_transform: QueryTransformStrategy | None = None,
+    ):
+        self.embeddings = embeddings
+        self.query_transform = query_transform or IdentityQueryTransform()
+
+    def retrieve(self, document: dict, question: str, limit: int) -> list[dict]:
+        vector_path = document.get("ingestion", {}).get("vector_path")
+        if not vector_path:
+            raise ValueError("Document has not been ingested yet.")
+
+        vector_store = FAISS.load_local(
+            vector_path,
+            embeddings=self.embeddings,
+            allow_dangerous_deserialization=True,
+        )
+        retrieval_query = self.query_transform.transform(question, document)
+        results = vector_store.similarity_search_with_score(retrieval_query, k=limit)
+
+        return [
+            {
+                "text": result.page_content,
+                "metadata": result.metadata,
+                "score": float(score),
+            }
+            for result, score in results
+        ]
+
+
+@lru_cache(maxsize=1)
+def get_embeddings() -> Embeddings:
+    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+
+
+def get_retrieval_strategy(config: RetrievalConfig | None = None) -> SimilarityRetrievalStrategy:
+    config = config or RetrievalConfig()
+    if config.strategy != "similarity":
+        raise ValueError(f"Unsupported retrieval strategy: {config.strategy}")
+
+    return SimilarityRetrievalStrategy(get_embeddings())
 
 
 def ingest_document(
@@ -61,8 +107,10 @@ def ingest_document(
 
     document_dir = Path(document["path"]).parent
     text_path = document_dir / "extracted_text.txt"
+    chunks_path = document_dir / "chunks.json"
     vector_path = document_dir / "faiss_index"
     text_path.write_text(text, encoding="utf-8")
+    chunks_path.write_text(json.dumps(chunks, indent=2), encoding="utf-8")
 
     vector_store = FAISS.from_texts(
         chunks,
@@ -80,41 +128,28 @@ def ingest_document(
 
     return {
         "text_path": str(text_path),
+        "chunks_path": str(chunks_path),
         "vector_path": str(vector_path),
         "character_count": len(text),
         "chunk_count": len(chunks),
         "embedding_model": EMBEDDING_MODEL,
         "embedding_dimensions": EMBEDDING_DIMENSIONS,
+        "chunking_strategy": CHUNKING_STRATEGY,
     }
 
 
-def chunk_text(text: str) -> list[str]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        # Prefer paragraph and sentence boundaries before falling back to hard splits.
-        separators=["\n\n", "\n", ". ", " ", ""],
+def chunk_text(text: str, config: ChunkingConfig | None = None) -> list[str]:
+    config = config or ChunkingConfig()
+    if config.strategy != "semantic":
+        raise ValueError(f"Unsupported chunking strategy: {config.strategy}")
+
+    splitter = SemanticChunker(
+        get_embeddings(),
+        breakpoint_threshold_type=config.breakpoint_threshold_type,
+        breakpoint_threshold_amount=config.breakpoint_threshold_amount,
     )
     return splitter.split_text(text)
 
 
 def retrieve_context(document: dict, question: str, limit: int = RETRIEVAL_K) -> list[dict]:
-    vector_path = document.get("ingestion", {}).get("vector_path")
-    if not vector_path:
-        raise ValueError("Document has not been ingested yet.")
-
-    vector_store = FAISS.load_local(
-        vector_path,
-        embeddings=get_embeddings(),
-        allow_dangerous_deserialization=True,
-    )
-    results = vector_store.similarity_search_with_score(question, k=limit)
-
-    return [
-        {
-            "text": result.page_content,
-            "metadata": result.metadata,
-            "score": float(score),
-        }
-        for result, score in results
-    ]
+    return get_retrieval_strategy().retrieve(document, question, limit)

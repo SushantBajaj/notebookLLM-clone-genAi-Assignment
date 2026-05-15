@@ -4,7 +4,10 @@ pydantic
 pypdf
 python-docx
 langchain-community
+langchain-experimental
+langchain-huggingface
 langchain-text-splitters
 faiss-cpu
 google-genai
 python-dotenv
+sentence-transformers

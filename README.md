@@ -12,8 +12,8 @@ The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The back
 - Shows the exact retrieved source chunks behind each answer.
 - Supports PDF, DOC, DOCX, and CSV files.
 - Extracts readable text from the uploaded file.
-- Splits the text into overlapping chunks for retrieval.
-- Builds a local FAISS vector index using deterministic local hash embeddings.
+- Splits the text into semantic chunks for retrieval.
+- Builds a local FAISS vector index using local HuggingFace sentence embeddings.
 - Sends only the most relevant chunks across uploaded documents to Gemini during chat.
 - Renders assistant Markdown in the frontend, including bold text, lists, links, and code blocks.
 - Adds storage checks for Railway-style limited volume storage.
@@ -103,6 +103,13 @@ const API_BASE_URL = "http://127.0.0.1:8000";
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-flash-latest
 
+EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+EMBEDDING_DIMENSIONS=384
+CHUNKING_STRATEGY=semantic
+SEMANTIC_BREAKPOINT_THRESHOLD_TYPE=percentile
+SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT=90
+RETRIEVAL_STRATEGY=similarity
+
 # Railway free volume limit: 0.5 GB = 536870912 bytes.
 STORAGE_LIMIT_BYTES=536870912
 STORAGE_SAFETY_MARGIN_BYTES=33554432
@@ -111,27 +118,23 @@ VECTOR_METADATA_BYTES_PER_CHUNK=2048
 
 The storage settings are intentionally visible because generated files can be much larger than the uploaded file. A compressed PDF may upload as a small file but expand into much more extracted text and index data.
 
-## Chunking Strategy
+## RAG Strategy
 
-The RAG pipeline uses LangChain's `RecursiveCharacterTextSplitter` in [backend/rag_pipeline.py](backend/rag_pipeline.py). The current settings are:
+The RAG pipeline uses LangChain's `SemanticChunker` in [backend/rag_pipeline.py](backend/rag_pipeline.py). The current settings are:
 
 ```python
-CHUNK_SIZE = 900
-CHUNK_OVERLAP = 160
+CHUNKING_STRATEGY = "semantic"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_DIMENSIONS = 384
+SEMANTIC_BREAKPOINT_THRESHOLD_TYPE = "percentile"
+SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT = 90
 RETRIEVAL_K = 12
 ```
 
-The splitter tries to preserve readable boundaries in this order:
-
-```python
-["\n\n", "\n", ". ", " ", ""]
-```
-
-That means it first tries to split around paragraphs, then lines, then sentences, then words. The empty string fallback is there so very long unbroken text can still be split instead of producing one oversized chunk.
-
-The chunk size is deliberately moderate. Around 900 characters keeps each retrieved chunk small enough for concise prompts while still giving the model enough surrounding context to answer naturally. The 160-character overlap carries a little context from one chunk into the next, which helps when an answer depends on text near a boundary.
+Semantic chunking embeds sentence groups and starts a new chunk when adjacent text becomes meaningfully different. The percentile threshold keeps splits focused on stronger topic shifts instead of fixed character counts.
 
 At chat time, the backend retrieves matching chunks from each checked source, sorts them by similarity, and sends the top 12 chunks overall to Gemini. This keeps prompts smaller and keeps answers grounded in the selected files instead of every full document being sent every time.
+
 
 ## Storage Behavior
 
@@ -146,6 +149,7 @@ For every upload, the backend stores:
 - the original uploaded file
 - `metadata.json`
 - `extracted_text.txt`
+- `chunks.json`
 - a FAISS index folder
 
 Before building the vector index, the backend estimates storage from the actual parsed text and chunk count. If the file would exceed the configured limit, the upload is removed and the user gets a clear error instead of a vague failure.
@@ -188,7 +192,7 @@ The chat response includes `answer` and `sources`. Each source contains the docu
 - This is assignment-grade storage, not production document management.
 - Railway volume storage can still fill up if many large files are uploaded, but removing a source from the UI also deletes its backend files.
 - Legacy `.doc` parsing is best-effort because old Word files are messy without heavier conversion tooling.
-- The local hash embedding is deterministic and free, but not as semantically strong as a real embedding model.
+- The local sentence embedding model improves retrieval quality but increases install size and first-run model loading time.
 
 ## Security Notes
 
