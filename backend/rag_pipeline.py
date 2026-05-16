@@ -1,9 +1,9 @@
 from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import lru_cache
 import json
 import os
+from threading import Lock
 from typing import Protocol
 
 from langchain_core.embeddings import Embeddings
@@ -24,6 +24,9 @@ SEMANTIC_BREAKPOINT_THRESHOLD_TYPE = os.getenv("SEMANTIC_BREAKPOINT_THRESHOLD_TY
 SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT = float(os.getenv("SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT", "90"))
 RETRIEVAL_STRATEGY = os.getenv("RETRIEVAL_STRATEGY", "similarity")
 RETRIEVAL_K = 12
+
+_embeddings: Embeddings | None = None
+_embeddings_lock = Lock()
 
 
 @dataclass(frozen=True)
@@ -81,9 +84,15 @@ class SimilarityRetrievalStrategy:
         ]
 
 
-@lru_cache(maxsize=1)
 def get_embeddings() -> Embeddings:
-    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    global _embeddings
+
+    if _embeddings is None:
+        with _embeddings_lock:
+            if _embeddings is None:
+                _embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+
+    return _embeddings
 
 
 def get_retrieval_strategy(config: RetrievalConfig | None = None) -> SimilarityRetrievalStrategy:
