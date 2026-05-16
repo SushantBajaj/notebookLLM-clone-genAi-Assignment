@@ -3,10 +3,8 @@ uvicorn[standard]
 pydantic
 pypdf
 python-docx
+langchain-core
 langchain-community
-langchain-experimental
-langchain-huggingface
 faiss-cpu
 google-genai
 python-dotenv
-sentence-transformers

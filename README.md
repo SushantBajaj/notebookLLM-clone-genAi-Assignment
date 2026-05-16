@@ -13,8 +13,8 @@ The app has a plain HTML/CSS/JavaScript frontend and a FastAPI backend. The back
 - Runs CRAG with query rewriting, retrieval grading, and a corrective branch with HyDE plus query variants.
 - Supports PDF, DOC, DOCX, and CSV files.
 - Extracts readable text from the uploaded file.
-- Splits the text into semantic chunks for retrieval.
-- Builds a local FAISS vector index using local HuggingFace sentence embeddings.
+- Splits the text into lightweight recursive chunks for retrieval.
+- Builds a local FAISS vector index using deterministic hashing embeddings.
 - Sends only the most relevant chunks across uploaded documents to Gemini during chat.
 - Renders assistant Markdown in the frontend, including bold text, lists, links, and code blocks.
 - Adds storage checks for Railway-style limited volume storage.
@@ -116,11 +116,11 @@ QUERY_VARIANT_RETRIEVAL_K=5
 FINAL_CONTEXT_K=10
 RERANK_CANDIDATE_K=24
 
-EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-EMBEDDING_DIMENSIONS=384
-CHUNKING_STRATEGY=semantic
-SEMANTIC_BREAKPOINT_THRESHOLD_TYPE=percentile
-SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT=90
+EMBEDDING_MODEL=hashing
+EMBEDDING_DIMENSIONS=2048
+CHUNKING_STRATEGY=recursive
+CHUNK_SIZE=1200
+CHUNK_OVERLAP=200
 RETRIEVAL_STRATEGY=similarity
 
 # Railway free volume limit: 0.5 GB = 536870912 bytes.
@@ -137,18 +137,18 @@ The storage settings are intentionally visible because generated files can be mu
 
 ## RAG Strategy
 
-The RAG pipeline uses LangChain's `SemanticChunker` in [backend/rag_pipeline.py](backend/rag_pipeline.py). The current settings are:
+The RAG pipeline uses lightweight recursive chunking, deterministic hashing embeddings, and a local FAISS index in [backend/rag_pipeline.py](backend/rag_pipeline.py). The current settings are:
 
 ```python
-CHUNKING_STRATEGY = "semantic"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIMENSIONS = 384
-SEMANTIC_BREAKPOINT_THRESHOLD_TYPE = "percentile"
-SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT = 90
+CHUNKING_STRATEGY = "recursive"
+CHUNK_SIZE = 1200
+CHUNK_OVERLAP = 200
+EMBEDDING_MODEL = "hashing"
+EMBEDDING_DIMENSIONS = 2048
 RETRIEVAL_K = 12
 ```
 
-Semantic chunking embeds sentence groups and starts a new chunk when adjacent text becomes meaningfully different. The percentile threshold keeps splits focused on stronger topic shifts instead of fixed character counts.
+Hashing embeddings avoid a local transformer model, PyTorch, and HuggingFace downloads, which keeps Railway deployments much smaller and faster to start. The tradeoff is that retrieval is more lexical than semantic: exact terms, names, and technical phrases work well, while synonyms and heavy paraphrasing are weaker than transformer embeddings.
 
 At chat time, the backend runs a CRAG loop before final answer generation:
 
@@ -242,4 +242,4 @@ The chat response includes `answer`, `sources`, and `crag`. Each source contains
 - This is assignment-grade storage, not production document management.
 - Railway volume storage can still fill up if many large files are uploaded, but removing a source from the UI also deletes its backend files.
 - Legacy `.doc` parsing is best-effort because old Word files are messy without heavier conversion tooling.
-- The local sentence embedding model improves retrieval quality but increases install size and first-run model loading time.
+- Hashing embeddings are lightweight and deployment-friendly, but they are more lexical than transformer embeddings and may miss matches that rely on synonyms or paraphrasing.

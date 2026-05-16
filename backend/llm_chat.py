@@ -702,12 +702,12 @@ def dedupe_matches(matches: list[dict], limit: int) -> list[dict]:
         if key not in deduped:
             deduped[key] = {
                 **match,
-                "retrieval_paths": [match.get("retrieval_path", "semantic")],
+                "retrieval_paths": [match.get("retrieval_path", "hashing")],
             }
             continue
 
         existing = deduped[key]
-        retrieval_path = match.get("retrieval_path", "semantic")
+        retrieval_path = match.get("retrieval_path", "hashing")
         if retrieval_path not in existing["retrieval_paths"]:
             existing["retrieval_paths"].append(retrieval_path)
 
@@ -749,7 +749,7 @@ def format_sources(matches: list[dict]) -> list[dict]:
                 "chunk_index": metadata.get("chunk_index", 0),
                 "text": match["text"],
                 "score": match["score"],
-                "retrieval_paths": match.get("retrieval_paths") or [match.get("retrieval_path", "semantic")],
+                "retrieval_paths": match.get("retrieval_paths") or [match.get("retrieval_path", "hashing")],
                 "rerank": match.get("rerank"),
             }
         )
